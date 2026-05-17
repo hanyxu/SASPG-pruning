@@ -1,0 +1,408 @@
+{
+    "wav2vec2.feature_extractor.conv_layers.1.conv": {
+        "Params": "786.43 K",
+        "MACs": 61640000000,
+        "latency": "7.28 ms"
+    },
+    "wav2vec2.feature_extractor.conv_layers.2.conv": {
+        "Params": "786.43 K",
+        "MACs": 30820000000,
+        "latency": "3.68 ms"
+    },
+    "wav2vec2.feature_extractor.conv_layers.3.conv": {
+        "Params": "786.43 K",
+        "MACs": 15400000000,
+        "latency": "2.13 ms"
+    },
+    "wav2vec2.feature_extractor.conv_layers.4.conv": {
+        "Params": "786.43 K",
+        "MACs": 7690000000,
+        "latency": "1.18 ms"
+    },
+    "wav2vec2.feature_extractor.conv_layers.5.conv": {
+        "Params": "524.29 K",
+        "MACs": 2560000000,
+        "latency": "730.04 us"
+    },
+    "wav2vec2.feature_extractor.conv_layers.6.conv": {
+        "Params": "524.29 K",
+        "MACs": 1280000000,
+        "latency": "737.91 us"
+    },
+    "wav2vec2.feature_projection.projection": {
+        "Params": "393.98 K",
+        "MACs": 959450000,
+        "latency": "292.3 us"
+    },
+    "wav2vec2.encoder.pos_conv_embed.conv": {
+        "Params": "4.72 M",
+        "MACs": 11550000000,
+        "latency": "10.65 ms"
+    },
+    "wav2vec2.encoder.layers.0.attention.k_proj": {
+        "Params": "591.37 K",
+        "MACs": 1440000000,
+        "latency": "1.39 ms"
+    },
+    "wav2vec2.encoder.layers.0.attention.v_proj": {
+        "Params": "591.37 K",
+        "MACs": 1440000000,
+        "latency": "1.36 ms"
+    },
+    "wav2vec2.encoder.layers.0.attention.q_proj": {
+        "Params": "591.37 K",
+        "MACs": 1440000000,
+        "latency": "1.66 ms"
+    },
+    "wav2vec2.encoder.layers.0.attention.out_proj": {
+        "Params": "591.37 K",
+        "MACs": 1440000000,
+        "latency": "1.38 ms"
+    },
+    "wav2vec2.encoder.layers.0.feed_forward.intermediate_dense": {
+        "Params": "2.37 M",
+        "MACs": 5760000000,
+        "latency": "2.13 ms"
+    },
+    "wav2vec2.encoder.layers.0.feed_forward.output_dense": {
+        "Params": "2.36 M",
+        "MACs": 5760000000,
+        "latency": "1.87 ms"
+    },
+    "wav2vec2.encoder.layers.1.attention.k_proj": {
+        "Params": "591.37 K",
+        "MACs": 1440000000,
+        "latency": "1.37 ms"
+    },
+    "wav2vec2.encoder.layers.1.attention.v_proj": {
+        "Params": "591.37 K",
+        "MACs": 1440000000,
+        "latency": "1.36 ms"
+    },
+    "wav2vec2.encoder.layers.1.attention.q_proj": {
+        "Params": "591.37 K",
+        "MACs": 1440000000,
+        "latency": "1.37 ms"
+    },
+    "wav2vec2.encoder.layers.1.attention.out_proj": {
+        "Params": "591.37 K",
+        "MACs": 1440000000,
+        "latency": "1.38 ms"
+    },
+    "wav2vec2.encoder.layers.1.feed_forward.intermediate_dense": {
+        "Params": "2.37 M",
+        "MACs": 5760000000,
+        "latency": "2.13 ms"
+    },
+    "wav2vec2.encoder.layers.1.feed_forward.output_dense": {
+        "Params": "2.36 M",
+        "MACs": 5760000000,
+        "latency": "1.88 ms"
+    },
+    "wav2vec2.encoder.layers.2.attention.k_proj": {
+        "Params": "591.37 K",
+        "MACs": 1440000000,
+        "latency": "1.37 ms"
+    },
+    "wav2vec2.encoder.layers.2.attention.v_proj": {
+        "Params": "591.37 K",
+        "MACs": 1440000000,
+        "latency": "1.38 ms"
+    },
+    "wav2vec2.encoder.layers.2.attention.q_proj": {
+        "Params": "591.37 K",
+        "MACs": 1440000000,
+        "latency": "1.36 ms"
+    },
+    "wav2vec2.encoder.layers.2.attention.out_proj": {
+        "Params": "591.37 K",
+        "MACs": 1440000000,
+        "latency": "1.4 ms"
+    },
+    "wav2vec2.encoder.layers.2.feed_forward.intermediate_dense": {
+        "Params": "2.37 M",
+        "MACs": 5760000000,
+        "latency": "2.1 ms"
+    },
+    "wav2vec2.encoder.layers.2.feed_forward.output_dense": {
+        "Params": "2.36 M",
+        "MACs": 5760000000,
+        "latency": "1.87 ms"
+    },
+    "wav2vec2.encoder.layers.3.attention.k_proj": {
+        "Params": "591.37 K",
+        "MACs": 1440000000,
+        "latency": "1.35 ms"
+    },
+    "wav2vec2.encoder.layers.3.attention.v_proj": {
+        "Params": "591.37 K",
+        "MACs": 1440000000,
+        "latency": "1.36 ms"
+    },
+    "wav2vec2.encoder.layers.3.attention.q_proj": {
+        "Params": "591.37 K",
+        "MACs": 1440000000,
+        "latency": "1.37 ms"
+    },
+    "wav2vec2.encoder.layers.3.attention.out_proj": {
+        "Params": "591.37 K",
+        "MACs": 1440000000,
+        "latency": "1.36 ms"
+    },
+    "wav2vec2.encoder.layers.3.feed_forward.intermediate_dense": {
+        "Params": "2.37 M",
+        "MACs": 5760000000,
+        "latency": "2.11 ms"
+    },
+    "wav2vec2.encoder.layers.3.feed_forward.output_dense": {
+        "Params": "2.36 M",
+        "MACs": 5760000000,
+        "latency": "1.86 ms"
+    },
+    "wav2vec2.encoder.layers.4.attention.k_proj": {
+        "Params": "591.37 K",
+        "MACs": 1440000000,
+        "latency": "1.35 ms"
+    },
+    "wav2vec2.encoder.layers.4.attention.v_proj": {
+        "Params": "591.37 K",
+        "MACs": 1440000000,
+        "latency": "1.36 ms"
+    },
+    "wav2vec2.encoder.layers.4.attention.q_proj": {
+        "Params": "591.37 K",
+        "MACs": 1440000000,
+        "latency": "1.36 ms"
+    },
+    "wav2vec2.encoder.layers.4.attention.out_proj": {
+        "Params": "591.37 K",
+        "MACs": 1440000000,
+        "latency": "1.36 ms"
+    },
+    "wav2vec2.encoder.layers.4.feed_forward.intermediate_dense": {
+        "Params": "2.37 M",
+        "MACs": 5760000000,
+        "latency": "2.11 ms"
+    },
+    "wav2vec2.encoder.layers.4.feed_forward.output_dense": {
+        "Params": "2.36 M",
+        "MACs": 5760000000,
+        "latency": "1.88 ms"
+    },
+    "wav2vec2.encoder.layers.5.attention.k_proj": {
+        "Params": "591.37 K",
+        "MACs": 1440000000,
+        "latency": "1.37 ms"
+    },
+    "wav2vec2.encoder.layers.5.attention.v_proj": {
+        "Params": "591.37 K",
+        "MACs": 1440000000,
+        "latency": "1.36 ms"
+    },
+    "wav2vec2.encoder.layers.5.attention.q_proj": {
+        "Params": "591.37 K",
+        "MACs": 1440000000,
+        "latency": "1.38 ms"
+    },
+    "wav2vec2.encoder.layers.5.attention.out_proj": {
+        "Params": "591.37 K",
+        "MACs": 1440000000,
+        "latency": "1.37 ms"
+    },
+    "wav2vec2.encoder.layers.5.feed_forward.intermediate_dense": {
+        "Params": "2.37 M",
+        "MACs": 5760000000,
+        "latency": "2.13 ms"
+    },
+    "wav2vec2.encoder.layers.5.feed_forward.output_dense": {
+        "Params": "2.36 M",
+        "MACs": 5760000000,
+        "latency": "1.87 ms"
+    },
+    "wav2vec2.encoder.layers.6.attention.k_proj": {
+        "Params": "591.37 K",
+        "MACs": 1440000000,
+        "latency": "1.36 ms"
+    },
+    "wav2vec2.encoder.layers.6.attention.v_proj": {
+        "Params": "591.37 K",
+        "MACs": 1440000000,
+        "latency": "1.56 ms"
+    },
+    "wav2vec2.encoder.layers.6.attention.q_proj": {
+        "Params": "591.37 K",
+        "MACs": 1440000000,
+        "latency": "1.38 ms"
+    },
+    "wav2vec2.encoder.layers.6.attention.out_proj": {
+        "Params": "591.37 K",
+        "MACs": 1440000000,
+        "latency": "1.37 ms"
+    },
+    "wav2vec2.encoder.layers.6.feed_forward.intermediate_dense": {
+        "Params": "2.37 M",
+        "MACs": 5760000000,
+        "latency": "2.12 ms"
+    },
+    "wav2vec2.encoder.layers.6.feed_forward.output_dense": {
+        "Params": "2.36 M",
+        "MACs": 5760000000,
+        "latency": "1.87 ms"
+    },
+    "wav2vec2.encoder.layers.7.attention.k_proj": {
+        "Params": "591.37 K",
+        "MACs": 1440000000,
+        "latency": "1.34 ms"
+    },
+    "wav2vec2.encoder.layers.7.attention.v_proj": {
+        "Params": "591.37 K",
+        "MACs": 1440000000,
+        "latency": "1.4 ms"
+    },
+    "wav2vec2.encoder.layers.7.attention.q_proj": {
+        "Params": "591.37 K",
+        "MACs": 1440000000,
+        "latency": "1.38 ms"
+    },
+    "wav2vec2.encoder.layers.7.attention.out_proj": {
+        "Params": "591.37 K",
+        "MACs": 1440000000,
+        "latency": "1.37 ms"
+    },
+    "wav2vec2.encoder.layers.7.feed_forward.intermediate_dense": {
+        "Params": "2.37 M",
+        "MACs": 5760000000,
+        "latency": "2.1 ms"
+    },
+    "wav2vec2.encoder.layers.7.feed_forward.output_dense": {
+        "Params": "2.36 M",
+        "MACs": 5760000000,
+        "latency": "1.86 ms"
+    },
+    "wav2vec2.encoder.layers.8.attention.k_proj": {
+        "Params": "591.37 K",
+        "MACs": 1440000000,
+        "latency": "1.37 ms"
+    },
+    "wav2vec2.encoder.layers.8.attention.v_proj": {
+        "Params": "591.37 K",
+        "MACs": 1440000000,
+        "latency": "1.36 ms"
+    },
+    "wav2vec2.encoder.layers.8.attention.q_proj": {
+        "Params": "591.37 K",
+        "MACs": 1440000000,
+        "latency": "1.37 ms"
+    },
+    "wav2vec2.encoder.layers.8.attention.out_proj": {
+        "Params": "591.37 K",
+        "MACs": 1440000000,
+        "latency": "1.36 ms"
+    },
+    "wav2vec2.encoder.layers.8.feed_forward.intermediate_dense": {
+        "Params": "2.37 M",
+        "MACs": 5760000000,
+        "latency": "2.1 ms"
+    },
+    "wav2vec2.encoder.layers.8.feed_forward.output_dense": {
+        "Params": "2.36 M",
+        "MACs": 5760000000,
+        "latency": "1.85 ms"
+    },
+    "wav2vec2.encoder.layers.9.attention.k_proj": {
+        "Params": "591.37 K",
+        "MACs": 1440000000,
+        "latency": "1.34 ms"
+    },
+    "wav2vec2.encoder.layers.9.attention.v_proj": {
+        "Params": "591.37 K",
+        "MACs": 1440000000,
+        "latency": "1.35 ms"
+    },
+    "wav2vec2.encoder.layers.9.attention.q_proj": {
+        "Params": "591.37 K",
+        "MACs": 1440000000,
+        "latency": "1.36 ms"
+    },
+    "wav2vec2.encoder.layers.9.attention.out_proj": {
+        "Params": "591.37 K",
+        "MACs": 1440000000,
+        "latency": "1.36 ms"
+    },
+    "wav2vec2.encoder.layers.9.feed_forward.intermediate_dense": {
+        "Params": "2.37 M",
+        "MACs": 5760000000,
+        "latency": "2.1 ms"
+    },
+    "wav2vec2.encoder.layers.9.feed_forward.output_dense": {
+        "Params": "2.36 M",
+        "MACs": 5760000000,
+        "latency": "1.88 ms"
+    },
+    "wav2vec2.encoder.layers.10.attention.k_proj": {
+        "Params": "591.37 K",
+        "MACs": 1440000000,
+        "latency": "1.35 ms"
+    },
+    "wav2vec2.encoder.layers.10.attention.v_proj": {
+        "Params": "591.37 K",
+        "MACs": 1440000000,
+        "latency": "1.36 ms"
+    },
+    "wav2vec2.encoder.layers.10.attention.q_proj": {
+        "Params": "591.37 K",
+        "MACs": 1440000000,
+        "latency": "1.37 ms"
+    },
+    "wav2vec2.encoder.layers.10.attention.out_proj": {
+        "Params": "591.37 K",
+        "MACs": 1440000000,
+        "latency": "1.59 ms"
+    },
+    "wav2vec2.encoder.layers.10.feed_forward.intermediate_dense": {
+        "Params": "2.37 M",
+        "MACs": 5760000000,
+        "latency": "2.09 ms"
+    },
+    "wav2vec2.encoder.layers.10.feed_forward.output_dense": {
+        "Params": "2.36 M",
+        "MACs": 5760000000,
+        "latency": "1.85 ms"
+    },
+    "wav2vec2.encoder.layers.11.attention.k_proj": {
+        "Params": "591.37 K",
+        "MACs": 1440000000,
+        "latency": "1.35 ms"
+    },
+    "wav2vec2.encoder.layers.11.attention.v_proj": {
+        "Params": "591.37 K",
+        "MACs": 1440000000,
+        "latency": "1.36 ms"
+    },
+    "wav2vec2.encoder.layers.11.attention.q_proj": {
+        "Params": "591.37 K",
+        "MACs": 1440000000,
+        "latency": "1.36 ms"
+    },
+    "wav2vec2.encoder.layers.11.attention.out_proj": {
+        "Params": "591.37 K",
+        "MACs": 1440000000,
+        "latency": "1.36 ms"
+    },
+    "wav2vec2.encoder.layers.11.feed_forward.intermediate_dense": {
+        "Params": "2.37 M",
+        "MACs": 5760000000,
+        "latency": "2.1 ms"
+    },
+    "wav2vec2.encoder.layers.11.feed_forward.output_dense": {
+        "Params": "2.36 M",
+        "MACs": 5760000000,
+        "latency": "1.86 ms"
+    },
+    "lm_head": {
+        "Params": "24.64 K",
+        "MACs": 179900000,
+        "latency": "2.18 ms",
+        "GFLOPS": "165.16 GFLOPS"
+    }
+}

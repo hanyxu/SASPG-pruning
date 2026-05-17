@@ -1,0 +1,11 @@
+task_id,downstream,mode,config,default_override,status,notes
+pr,ctc,train,downstream/ctc/libriphone.yaml,,ready,Phoneme Recognition
+asr,asr,train,,config.optimizer.lr=1.0e-5,ready,Automatic Speech Recognition
+ks,speech_commands,train,,,ready,Keyword Spotting
+qbe,quesst14_dtw,evaluate,,,ready,Query-by-Example (no train stage)
+sid,voxceleb1,train,,,ready,Speaker Identification
+asv,sv_voxceleb1,train,,,ready,Automatic Speaker Verification
+sd,diarization,train,,,ready,Speaker Diarization
+er,emotion,train,downstream/emotion/config.yaml,config.downstream_expert.datarc.test_fold='fold1',ready,Emotion Recognition (default fold1)
+ic,fluent_commands,train,,,ready,Intent Classification
+sf,ctc,train,downstream/ctc/snips.yaml,,ready,Slot Filling

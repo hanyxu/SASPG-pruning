@@ -1,0 +1,12 @@
+cache/
+smoke_runs_*/
+__pycache__/
+*.pyc
+.pytest_cache/
+env.sh
+*.log
+data/librispeech/audio/*
+!data/librispeech/audio/README.md
+data/librispeech/audio_root_link
+hf_models/*
+!hf_models/README.md

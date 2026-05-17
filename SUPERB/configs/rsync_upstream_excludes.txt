@@ -1,0 +1,8 @@
+# Do not vendor local training outputs when running prepare_local_dependencies.sh
+exp_*/
+**/ckpts/
+*.ckpt
+*.pth
+__pycache__/
+*.pyc
+smoke960_logs/

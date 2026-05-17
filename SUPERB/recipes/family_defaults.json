@@ -1,0 +1,18 @@
+{
+  "native": {
+    "upstream_mode_default": "distill_prune_ft",
+    "description": "Reserved for non-matrix baselines (not used in the 48 upstream experiments)"
+  },
+  "saspg": {
+    "upstream_mode_default": "distill_prune_ft",
+    "description": "Structured / unstructured SASPG distillation + pruning + FT"
+  },
+  "magnitude": {
+    "upstream_mode_default": "prune_then_ft",
+    "description": "Magnitude pruning then finetune"
+  },
+  "dphubert": {
+    "upstream_mode_default": "distill_prune_ft",
+    "description": "Explicit DPHuBERT-family launchers (often same scripts as saspg row)"
+  }
+}

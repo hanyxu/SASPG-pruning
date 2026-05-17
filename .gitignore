@@ -1,0 +1,22 @@
+# OS / editor
+.DS_Store
+*.swp
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+env.sh
+
+# ASR runtime
+ASR/cache/
+ASR/smoke_runs_*/
+ASR/hf_models/*
+!ASR/hf_models/README.md
+ASR/data/librispeech/audio/*
+!ASR/data/librispeech/audio/README.md
+
+# SUPERB local upstream copies (prepare_local_dependencies.sh)
+SUPERB/DPHuBERT/
+SUPERB/DPHuBERT_pretrain/
+SUPERB/DPHuBERT_pretrain_unstr/
