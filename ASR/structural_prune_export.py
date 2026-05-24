@@ -3,7 +3,8 @@
 # Writes ``<config.base.output_dir>/out/pruned/config.json`` with per-layer
 # ``pruned_attention_heads`` / ``pruned_ffn_inter`` plus ``pytorch_model.bin``
 # whose weight tensors use **reduced matrix shapes** (true structural shrink),
-# loadable by ``models_my.str_modeling_*_minmax_magnitude`` (same contract as prune_ASR_*_mag.py).
+# loadable by ``models_my.str_modeling_*_minmax_magnitude`` (reduced Linear shapes only;
+# SASPG channel masks come from training ``prune()`` / ladder, not magnitude ranking at export).
 
 import json
 import logging
@@ -50,7 +51,7 @@ def _coerce_input_values_tensor(raw: Union[torch.Tensor, Any], device: torch.dev
 
 
 def _populate_mask_channel_eval(model: torch.nn.Module, row: Dict[str, Any], device: torch.device) -> None:
-    """One forward in eval so each layer picks discrete mask_channel (argmax ladder)."""
+    """Full-model forward in eval (NASP ladder: Gumbel masks depend on layer forward)."""
     model.eval()
     with torch.no_grad():
         input_values = _coerce_input_values_tensor(row["input_values"], device)
@@ -63,6 +64,40 @@ def _populate_mask_channel_eval(model: torch.nn.Module, row: Dict[str, Any], dev
                 am = am.unsqueeze(0)
             kwargs["attention_mask"] = am
         model(**kwargs)
+
+
+def _populate_saspg_masks_from_weights(layers) -> None:
+    """SASPG str: masks from weight scores + ``threshold_prune_channel`` only (no activations)."""
+    from utils.channel_prune_str import (
+        saspg_apply_attn_channel_mask,
+        saspg_apply_ffn_channel_mask,
+    )
+
+    for layer in layers:
+        for submodule in (layer.attention, layer.feed_forward):
+            submodule.mask_channel = None
+            if hasattr(submodule, "eta_max"):
+                submodule.tau = float(submodule.eta_max)
+            if hasattr(submodule, "intermediate_dense"):
+                saspg_apply_ffn_channel_mask(submodule)
+            else:
+                saspg_apply_attn_channel_mask(submodule)
+
+
+def _populate_mag_str_masks_from_weights(layers) -> None:
+    """MAG str prune-first: fixed top-k channel masks from weight magnitude (no CTC training)."""
+    from utils.channel_prune_str import (
+        mag_apply_attn_channel_mask,
+        mag_apply_ffn_channel_mask,
+    )
+
+    for layer in layers:
+        for submodule in (layer.attention, layer.feed_forward):
+            submodule.mask_channel = None
+            if hasattr(submodule, "intermediate_dense"):
+                mag_apply_ffn_channel_mask(submodule)
+            else:
+                mag_apply_attn_channel_mask(submodule)
 
 
 def _copy_tokenizer_sidecars(orig_out_dir: str, pruned_dir: str, vendor: str, release_root: str) -> None:
@@ -115,13 +150,22 @@ def export_structural_prune_posttrain(
     pruned_dir = os.path.join(orig_out, "pruned")
     os.makedirs(pruned_dir, exist_ok=True)
 
-    device = next(q_model.parameters()).device
-    row = _first_eval_row(trainer)
-    if row is None:
-        logger.warning("structural_prune_export: skip (no eval_dataset / empty)")
-        return None
-
-    _populate_mask_channel_eval(q_model, row, device)
+    nasp_ladder = bool(getattr(config.prune_cfg, "nasp_ladder", False))
+    if nasp_ladder:
+        device = next(q_model.parameters()).device
+        row = _first_eval_row(trainer)
+        if row is None:
+            logger.warning("structural_prune_export: skip (no eval_dataset / empty)")
+            return None
+        _populate_mask_channel_eval(q_model, row, device)
+        logger.info(
+            "structural_prune_export: populated mask_channel via eval forward (NASP ladder)"
+        )
+    else:
+        _populate_saspg_masks_from_weights(layers)
+        logger.info(
+            "structural_prune_export: populated mask_channel from weights+threshold (SASPG)"
+        )
 
     config_pruned = deepcopy(hf_config.to_dict())
     pruned_attention_heads = []
@@ -165,3 +209,42 @@ def export_structural_prune_posttrain(
 
     _copy_tokenizer_sidecars(orig_out, pruned_dir, vendor, release_root)
     return pruned_dir
+
+
+def load_structural_pruned_for_inference(pruned_dir: str, device: Optional[torch.device] = None):
+    """Load ``out/pruned/`` checkpoint (reduced Linear shapes) for WER inference."""
+    cfg_path = os.path.join(pruned_dir, "config.json")
+    if not os.path.isfile(cfg_path):
+        raise FileNotFoundError(f"missing structural pruned config: {cfg_path}")
+
+    with open(cfg_path, encoding="utf-8") as f:
+        cfg_dict = json.load(f)
+    model_type = cfg_dict.get("model_type", "")
+
+    if model_type == "wav2vec2":
+        from models_my.str_modeling_wav2vec2_minmax_magnitude import Wav2Vec2ForCTC as ForCTC
+        from transformers import Wav2Vec2Config
+
+        pruned_cfg = Wav2Vec2Config.from_pretrained(pruned_dir)
+    else:
+        from models_my.str_modeling_hubert_minmax_magnitude import HubertForCTC as ForCTC
+        from transformers import HubertConfig
+
+        pruned_cfg = HubertConfig.from_pretrained(pruned_dir)
+
+    pruned_cfg.prune = False
+    model = ForCTC.from_pretrained(pruned_dir, config=pruned_cfg)
+    bin_path = os.path.join(pruned_dir, "pytorch_model.bin")
+    if os.path.isfile(bin_path):
+        state = torch.load(bin_path, map_location="cpu")
+        model.load_state_dict(state, strict=False)
+
+    if device is not None:
+        model = model.to(device)
+    model.eval()
+    logger.info(
+        "structural_prune_export: loaded inference model from %s (model_type=%s)",
+        pruned_dir,
+        model_type,
+    )
+    return model

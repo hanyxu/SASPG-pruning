@@ -60,3 +60,4 @@ fi
 
 echo "[ASR] slot=${_slot} method=mag_str backbone=${_backbone} sp=${_sp} type=100 max_steps=${MAX_STEPS} out=${_out}"
 run_asr_smoke_mag_str_100h "$_out" "$_backbone" "$_sp"
+echo "[ASR MAG smoke OK] ${_slot}"

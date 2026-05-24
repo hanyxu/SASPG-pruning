@@ -1273,7 +1273,14 @@ class SyBayesianBitsPruner(SymmetricUniformPruner):
         
         self.channel_pruning = channel_pruning
         # self.prune_output = True
-        
+
+        self.value_0_5 = value_0_5
+        self.value_0_25 = value_0_25
+        self.value_1 = value_1
+        self.value_0_75 = value_0_75
+        self.value_0_125 = value_0_125
+        self.value_0_1 = value_0_1
+        self.value_0_075 = value_0_075
         
         self.gate_init_dict = gate_init_dict
         self.fixed_bit_dict = fixed_bit_dict
@@ -1504,7 +1511,7 @@ class SyBayesianBitsPruner(SymmetricUniformPruner):
             size = self.x_shape
 
         # SASPG str: no Gumbel ladder; exact_size set from active channel mask in the layer forward.
-        if self.value_0_075 == 0 and self.value_0_1 == 0:
+        if getattr(self, "value_0_075", 0) == 0 and getattr(self, "value_0_1", 0) == 0:
             return float(getattr(self, "exact_size", 0) or 0)
         
         # num_ones = torch.sum(self.x_prune_mask_hard == 1).item()
@@ -2046,7 +2053,11 @@ class SyBayesianBitsPruner(SymmetricUniformPruner):
             
             else:
                 # print('self.mag_mask used')
-                x_prune = self.mag_mask * x
+                _mask = self.mag_mask
+                if _mask.device != x.device:
+                    _mask = _mask.to(device=x.device, dtype=x.dtype)
+                    self.mag_mask = _mask
+                x_prune = _mask * x
                 
                 count_ones = torch.sum(torch.eq(self.mag_mask, 1)).item()
                 self.sp_ratio = count_ones/self.mag_mask.numel()

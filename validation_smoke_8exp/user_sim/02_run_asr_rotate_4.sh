@@ -38,8 +38,8 @@ _run() {
   fi
 }
 
-# _run "01_wav2vec2_base_unstr" "${VAL_ROOT}/ASR/01_wav2vec2_base_unstr_saspg_100h.sh"
-# _run "02_wav2vec2_base_str"   "${VAL_ROOT}/ASR/02_wav2vec2_base_str_saspg_100h.sh"
+_run "01_wav2vec2_base_unstr" "${VAL_ROOT}/ASR/01_wav2vec2_base_unstr_saspg_100h.sh"
+_run "02_wav2vec2_base_str"   "${VAL_ROOT}/ASR/02_wav2vec2_base_str_saspg_100h.sh"
 _run "03_hubert_large_unstr"  "${VAL_ROOT}/ASR/03_hubert_large_unstr_saspg_100h.sh"
 _run "04_hubert_large_str"    "${VAL_ROOT}/ASR/04_hubert_large_str_saspg_100h.sh"
 

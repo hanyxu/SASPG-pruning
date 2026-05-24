@@ -59,3 +59,4 @@ fi
 
 echo "[ASR] slot=${_slot} method=mag_unstr backbone=${_backbone} sp=${_sp} MAX_STEPS=${MAX_STEPS} out=${_out} (prune-first, single finetune)"
 run_asr_smoke_mag_unstr_100h "$_out" "$_backbone" "$_sp"
+echo "[ASR MAG smoke OK] ${_slot}"

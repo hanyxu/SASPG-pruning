@@ -11,7 +11,7 @@ from torch.nn.modules.pooling import _AdaptiveAvgPoolNd, _AvgPoolNd
 from pruning.base_pruned_classes import FP32Acts, PrunedActivation, PrunedModule
 from pruning.hijacker import PruningHijacker, activations_list
 
-from pruning_manager_direct import PruningManager
+from pruning.pruning_manager_direct import PruningManager
 from pruning.pruners_direct import AsymmetricUniformPruner, SymmetricUniformPruner, PMethods, PrunerNotInitializedError
 
 class PruneConv1d(PruningHijacker, nn.Conv1d): # activation=None?

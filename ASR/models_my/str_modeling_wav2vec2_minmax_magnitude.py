@@ -43,7 +43,7 @@ from transformers.modeling_outputs import (
     XVectorOutput,
 )
 from transformers.modeling_utils import PreTrainedModel
-from transformers.pytorch_utils import torch_int_div
+from utils.transformers_compat import torch_int_div
 from transformers.utils import (
     ModelOutput,
     add_code_sample_docstrings,
@@ -218,7 +218,7 @@ def _compute_mask_indices(
     )
 
     # SpecAugment mask to fill
-    spec_aug_mask = np.zeros((batch_size, sequence_length), dtype=np.bool)
+    spec_aug_mask = np.zeros((batch_size, sequence_length), dtype=np.bool_)
     spec_aug_mask_idxs = []
 
     max_num_masked_span = compute_num_masked_span(sequence_length)
@@ -291,7 +291,7 @@ def _sample_negative_indices(
     sampled_negative_indices = np.zeros(shape=(batch_size, sequence_length, num_negatives), dtype=np.int32)
 
     mask_time_indices = (
-        mask_time_indices.astype(np.bool) if mask_time_indices is not None else np.ones(features_shape, dtype=np.bool)
+        mask_time_indices.astype(np.bool_) if mask_time_indices is not None else np.ones(features_shape, dtype=np.bool_)
     )
 
     for batch_idx in range(batch_size):
@@ -601,6 +601,8 @@ class Wav2Vec2Attention(nn.Module):
             
             if self.eta_max == self.eta_min:
                 self.tau = self.eta_max
+            elif not self.total_steps or self.warmup_ratio is None:
+                self.tau = self.eta_max
             else:
                 progress = self.current_steps / self.total_steps
                 warmup = progress <= self.warmup_ratio
@@ -711,58 +713,45 @@ class Wav2Vec2Attention(nn.Module):
 
         attn_output = attn_output.view(bsz, self.num_heads, tgt_len, self.head_dim)
 
-        
-        w_q = self.q_proj.weight
-        w_k = self.k_proj.weight
-        w_v = self.v_proj.weight
-        w_out = self.out_proj.weight
+        if self.prune_heads:
+            w_q = self.q_proj.weight
+            w_k = self.k_proj.weight
+            w_v = self.v_proj.weight
+            w_out = self.out_proj.weight
 
-        # 计算每个 channel 的 L2 范数
-        self.sum_channel_score = (w_q**2).sum(dim=1) + (w_k**2).sum(dim=1) + (w_v**2).sum(dim=1) + (w_out**2).sum(dim=0)
-        self.sum_channel_score = self.sum_channel_score.reshape(self.num_heads, -1, 1).sum(dim=1)
+            self.sum_channel_score = (w_q**2).sum(dim=1) + (w_k**2).sum(dim=1) + (w_v**2).sum(dim=1) + (w_out**2).sum(dim=0)
+            self.sum_channel_score = self.sum_channel_score.reshape(self.num_heads, -1, 1).sum(dim=1)
 
-        # 归一化
-        # prob_score = self.normalize(self.sum_channel_score)
+            if not hasattr(self, "fixed_mask") and not self.mag_pruned:
+                num_channels = self.sum_channel_score.size(0)
+                if self.all_prune_ratio == 0.1:
+                    num_keep = 1
+                elif self.all_prune_ratio == 0.2:
+                    num_keep = 2
+                elif self.all_prune_ratio == 0.3:
+                    num_keep = 4
+                elif self.all_prune_ratio == 0.4:
+                    num_keep = 5
+                elif self.all_prune_ratio == 0.5:
+                    num_keep = 6
+                num_keep = int(num_channels * (self.all_prune_ratio))
 
-        # 如果是第一次 forward，则初始化 mask
-        if not hasattr(self, "fixed_mask") and not self.mag_pruned:
-            # 计算需要保留的 channel 数量
-            # import pdb;pdb.set_trace()
-            num_channels = self.sum_channel_score.size(0)
-            if self.all_prune_ratio == 0.1:
-                num_keep = 1
-            elif self.all_prune_ratio == 0.2:
-                num_keep = 2
-            elif self.all_prune_ratio == 0.3:
-                num_keep = 4
-            elif self.all_prune_ratio == 0.4:
-                num_keep = 5
-            elif self.all_prune_ratio == 0.5:
-                num_keep = 6   
-            num_keep = int(num_channels * (self.all_prune_ratio))  # 保留的 channel 数量
+                _, sorted_indices = torch.sort(self.sum_channel_score.squeeze(-1), descending=True)
 
-            # 对 channel 的 magnitude 进行排序，获取排序后的索引
-            _, sorted_indices = torch.sort(self.sum_channel_score.squeeze(-1), descending=True)
+                self.fixed_mask = torch.zeros_like(self.sum_channel_score, dtype=torch.bool)
+                self.fixed_mask[sorted_indices[:num_keep]] = True
 
-            # 保留前 num_keep 个 channel，其余的 mask 掉
-            self.fixed_mask = torch.zeros_like(self.sum_channel_score, dtype=torch.bool)
-            self.fixed_mask[sorted_indices[:num_keep]] = True
+                self.compiled_mask = self.fixed_mask
 
-            
-            self.compiled_mask = self.fixed_mask
+                self.fixed_mask = self.fixed_mask.squeeze(-1)
 
-            self.fixed_mask = self.fixed_mask.squeeze(-1)
+                self.mask_channel = self.fixed_mask
 
-            self.mask_channel = self.fixed_mask
+                self.mag_pruned.fill_(1.)
 
-            self.mag_pruned.fill_(1.)
+            self.prune_ratio = 1.0 - torch.sum(self.fixed_mask).float() / self.fixed_mask.numel()
 
-        # 计算实际的 prune_ratio
-        self.prune_ratio = 1.0 - torch.sum(self.fixed_mask).float() / self.fixed_mask.numel()
-        # print('Attn Prune ratio:', self.prune_ratio.item())
-
-            
-        attn_output = attn_output * self.fixed_mask.unsqueeze(-1).unsqueeze(-1)
+            attn_output = attn_output * self.fixed_mask.unsqueeze(-1).unsqueeze(-1)
 
         attn_output = attn_output.transpose(1, 2)
 
@@ -903,6 +892,8 @@ class Wav2Vec2FeedForward(nn.Module):
             
             if self.eta_max == self.eta_min:
                 self.tau = self.eta_max
+            elif not self.total_steps or self.warmup_ratio is None:
+                self.tau = self.eta_max
             else:
                 progress = self.current_steps / self.total_steps
                 warmup = progress <= self.warmup_ratio
@@ -924,44 +915,35 @@ class Wav2Vec2FeedForward(nn.Module):
         hidden_states = self.intermediate_act_fn(hidden_states)
         hidden_states = self.intermediate_dropout(hidden_states)
 
-        w_in = self.intermediate_dense.weight
-        w_out = self.output_dense.weight
+        if self.prune_intermediate:
+            w_in = self.intermediate_dense.weight
+            w_out = self.output_dense.weight
 
-        # 计算每个 channel 的 L2 范数
-        self.sum_channel_score = (w_in**2).sum(dim=1) + (w_out**2).sum(dim=0)
+            self.sum_channel_score = (w_in**2).sum(dim=1) + (w_out**2).sum(dim=0)
 
-        # 如果是第一次 forward，则初始化 mask
-        if not hasattr(self, "fixed_mask") and not self.mag_pruned:
-            # print('FFN first forward')
-            # 计算需要保留的 channel 数量
-            # import pdb;pdb.set_trace()
-            num_channels = self.sum_channel_score.size(0)
-            relative_ratio = 0.500163
-            realative_head_gap = float(round(12 * (self.all_prune_ratio)) - 12 * (self.all_prune_ratio))/12
-                
-            self.all_prune_ratio = self.all_prune_ratio - relative_ratio*realative_head_gap
-                
-            num_keep = int(num_channels * (self.all_prune_ratio))  # 保留的 channel 数量
+            if not hasattr(self, "fixed_mask") and not self.mag_pruned:
+                num_channels = self.sum_channel_score.size(0)
+                relative_ratio = 0.500163
+                realative_head_gap = float(round(12 * (self.all_prune_ratio)) - 12 * (self.all_prune_ratio))/12
 
-            # 对 channel 的 magnitude 进行排序，获取排序后的索引
-            _, sorted_indices = torch.sort(self.sum_channel_score, descending=True)
+                self.all_prune_ratio = self.all_prune_ratio - relative_ratio*realative_head_gap
 
-            # 保留前 num_keep 个 channel，其余的 mask 掉
-            self.fixed_mask = torch.zeros_like(self.sum_channel_score, dtype=torch.bool)
-            self.fixed_mask[sorted_indices[:num_keep]] = True
+                num_keep = int(num_channels * (self.all_prune_ratio))
 
+                _, sorted_indices = torch.sort(self.sum_channel_score, descending=True)
 
-            self.compiled_mask = self.fixed_mask
+                self.fixed_mask = torch.zeros_like(self.sum_channel_score, dtype=torch.bool)
+                self.fixed_mask[sorted_indices[:num_keep]] = True
 
-            self.mask_channel = self.fixed_mask
+                self.compiled_mask = self.fixed_mask
 
-            self.mag_pruned.fill_(1.)
+                self.mask_channel = self.fixed_mask
 
-        # 计算实际的 prune_ratio
-        self.prune_ratio = 1.0 - torch.sum(self.fixed_mask).float() / self.fixed_mask.numel()
-        # print('FFN Prune ratio:', self.prune_ratio.item())
+                self.mag_pruned.fill_(1.)
 
-        hidden_states = hidden_states * self.compiled_mask
+            self.prune_ratio = 1.0 - torch.sum(self.fixed_mask).float() / self.fixed_mask.numel()
+
+            hidden_states = hidden_states * self.compiled_mask
 
         hidden_states = self.output_dense(hidden_states)
             
@@ -2139,15 +2121,52 @@ class Wav2Vec2ForCTC(Wav2Vec2PreTrainedModel):
     
         return total_params
 
-    def get_target_sparsity(self):
-        assert self.all_prune_ratio != 0
+    def get_target_prune_ratio(self):
+        """Scheduled target prune ratio (same scale as spXX / max_prune_ratio)."""
+        if getattr(self, "already_pruned", False) or self.all_prune_ratio == 0:
+            return 0.0
         tag_sp_ratio = self.warmup_ratio / 3
         if self.current_steps >= tag_sp_ratio * self.total_steps:
-            return (1 - self.all_prune_ratio)
-        return (1 - self.all_prune_ratio) * (self.current_steps / (tag_sp_ratio * self.total_steps))
-        
+            return float(self.all_prune_ratio)
+        return float(self.all_prune_ratio) * (
+            self.current_steps / (tag_sp_ratio * self.total_steps)
+        )
+
+    def get_target_sparsity(self):
+        """Backward-compatible alias; returns target **prune** ratio, not retention."""
+        return self.get_target_prune_ratio()
+
     def get_total_params(self):
         return sum(p.numel() for p in self.parameters())
+
+    def _param_prune_ratios(self):
+        """Full-model and encoder-transformer prune ratios vs nominal dense.
+
+        Returns (full_model_prune_ratio, encoder_tf_prune_ratio, cur_all, dense_model,
+                 cur_enc_tf, dense_enc_tf).
+        """
+        from .structural_encoder_param_stats import encoder_dense_attn_ff_param_total
+
+        current_total = sum(p.numel() for p in self.parameters())
+        current_enc_tf = int(self.get_encoder_params())
+        dense_enc_tf = encoder_dense_attn_ff_param_total(self.config)
+        if dense_enc_tf is None or dense_enc_tf <= 0:
+            d = float(max(current_total, 1))
+            e = float(max(current_enc_tf, 1))
+            return 0.0, 0.0, float(current_total), d, float(current_enc_tf), e
+        non_enc = float(current_total - current_enc_tf)
+        dense_total = non_enc + float(dense_enc_tf)
+        pr_full = (
+            max(0.0, min(1.0, 1.0 - float(current_total) / dense_total))
+            if dense_total > 0
+            else 0.0
+        )
+        pr_enc = (
+            max(0.0, min(1.0, 1.0 - float(current_enc_tf) / float(dense_enc_tf)))
+            if dense_enc_tf > 0
+            else 0.0
+        )
+        return pr_full, pr_enc, float(current_total), dense_total, float(current_enc_tf), float(dense_enc_tf)
 
     # @auto_docstring
     def forward(
@@ -2187,15 +2206,16 @@ class Wav2Vec2ForCTC(Wav2Vec2PreTrainedModel):
         # print('self.lambda1:',self.lambda1, self.lambda2)
         loss = None
         ctc_loss = None
-        self.cur_target_sparsity = self.get_target_sparsity()
-        
+        if labels is not None and not getattr(self, "already_pruned", False):
+            self.cur_target_prune_ratio = self.get_target_prune_ratio()
+        else:
+            self.cur_target_prune_ratio = 0.0
+
         trans_params = self.get_trans_param_str()
-        
+
         conv_params = self.total_params - self.all_trans_params
         current_params = conv_params + trans_params
-        # import pdb;pdb.set_trace()
-        # current_sparsity = 1 - current_params / self.total_params
-        current_sparsity = 1 - trans_params / self.all_trans_params
+        current_trans_prune_ratio = 1 - trans_params / self.all_trans_params
         # import pdb;pdb.set_trace()
         # for name, param in self.named_parameters():
         #     if param.requires_grad and 'lambda' in name:
@@ -2273,9 +2293,30 @@ class Wav2Vec2ForCTC(Wav2Vec2PreTrainedModel):
         
         if self.training:
             if self.current_steps % 100 == 0:
+                if self.total_steps == 0:
+                    self.total_steps = 1
+                (
+                    pr_full,
+                    pr_enc,
+                    cur_tot,
+                    dense_tot,
+                    cur_enc,
+                    dense_enc,
+                ) = self._param_prune_ratios()
+                prune_msg = (
+                    f"full_model_prune_ratio={pr_full:.6f} "
+                    f"(1 - current_all_params/dense_model_params; "
+                    f"current={cur_tot:.0f} dense≈{dense_tot:.0f}), "
+                    f"encoder_transformer_attn_ff_prune_ratio={pr_enc:.6f} "
+                    f"(1 - current_encoder_tf/dense_encoder_tf; "
+                    f"current={cur_enc:.0f} dense={dense_enc:.0f}), "
+                )
                 logger.info(
                     f'str_export stage2:{self.already_pruned} TRAIN - '
-                    f'cur_target_sparsity: {self.cur_target_sparsity}, cur_sparsity: {current_sparsity}, '
+                    f'cur_target_prune_ratio(schedule): {self.cur_target_prune_ratio:.6f}, '
+                    f'{prune_msg}'
+                    f'current_trans_prune_ratio={current_trans_prune_ratio:.6f} '
+                    f'(1 - trans_params/all_trans_params), '
                     f'ctc loss:{ctc_loss}, sum loss:{loss}, current_parms:{current_params}, '
                     f'total_params:{self.total_params}, lmbda1:{self.lambda1}, '
                     f'lmbda2:{self.lambda2}, '
@@ -2283,10 +2324,31 @@ class Wav2Vec2ForCTC(Wav2Vec2PreTrainedModel):
                     # f'learning_rate: {self.optimizer.param_groups[0]["lr"] if hasattr(self, "optimizer") else "N/A"}'
                 )
         else:
-            if self.eval_steps % 500 == 0:  
+            if self.eval_steps % 500 == 0:
+                if self.total_steps == 0:
+                    self.total_steps = 1
+                (
+                    pr_full,
+                    pr_enc,
+                    cur_tot,
+                    dense_tot,
+                    cur_enc,
+                    dense_enc,
+                ) = self._param_prune_ratios()
+                prune_msg = (
+                    f"full_model_prune_ratio={pr_full:.6f} "
+                    f"(1 - current_all_params/dense_model_params; "
+                    f"current={cur_tot:.0f} dense≈{dense_tot:.0f}), "
+                    f"encoder_transformer_attn_ff_prune_ratio={pr_enc:.6f} "
+                    f"(1 - current_encoder_tf/dense_encoder_tf; "
+                    f"current={cur_enc:.0f} dense={dense_enc:.0f}), "
+                )
                 logger.info(
                     f'str_export stage2:{self.already_pruned} EVAL - '
-                    f'cur_target_sparsity: {self.cur_target_sparsity}, cur_sparsity: {current_sparsity}, '
+                    f'{"" if self.already_pruned else f"cur_target_prune_ratio(schedule): {self.cur_target_prune_ratio:.6f}, "}'
+                    f'{prune_msg}'
+                    f'current_trans_prune_ratio={current_trans_prune_ratio:.6f} '
+                    f'(1 - trans_params/all_trans_params), '
                     f'ctc loss:{ctc_loss}, sum loss:{loss}, current_parms:{current_params}, '
                     f'total_params:{self.total_params}, lmbda1:{self.lambda1}, '
                     f'lmbda2:{self.lambda2}, '

@@ -18,6 +18,14 @@ except ImportError:
     # Newer datasets removes load_metric; keep backward compatibility.
     from evaluate import load as load_metric
 
+
+def _load_wer_metric():
+    """Load WER metric without interactive trust_remote_code prompt (batch-safe)."""
+    try:
+        return load_metric("wer", trust_remote_code=True)
+    except TypeError:
+        return load_metric("wer")
+
 from copy import deepcopy
 from functools import partial
 from pathlib import Path
@@ -50,8 +58,10 @@ def resolve_smoke_reg_type(reg_type: str, model_name: str = None) -> str:
         return "saspg_hubert" if hubert else "saspg"
     if reg_type == "saspg_str":
         return "channelpruninghubert" if hubert else "channelpruning"
-    if reg_type in ("mag_unstr", "mag_str"):
+    if reg_type == "mag_unstr":
         return "mag_mask_hubert" if hubert else "mag_mask"
+    if reg_type == "mag_str":
+        return "channelpruninghubert" if hubert else "channelpruning"
     if reg_type == "nasp_str":
         return "channelpruninghubert" if hubert else "channelpruning"
     return reg_type
@@ -113,9 +123,23 @@ from utils import (
     # get_macs,
     # return_dict
 )
+from utils.prune_ratio_utils import (
+    log_encoder_prune_ratio_before_inference,
+    prune_kind_from_reg_type,
+)
 
 os.environ["WANDB_DISABLED"] = "true"
 os.environ['CUBLAS_WORKSPACE_CONFIG'] = ':4096:8'
+
+
+def _smoke_eval_test_only() -> bool:
+    """When set, LibriSpeech inference WER only on test-clean + test-other (skip dev/val_other)."""
+    return os.environ.get("SMOKE_EVAL_TEST_ONLY", "0").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
 
 # setup logger
 ########################################################
@@ -127,6 +151,20 @@ os.environ['CUBLAS_WORKSPACE_CONFIG'] = ':4096:8'
 ########################################################
 logger = logging.getLogger('main')
 logger.setLevel(os.environ.get('LOGLEVEL', 'INFO'))
+
+
+def _log_encoder_prune_ratio_before_wer_map(config, model, dataset, phase: str) -> None:
+    """One-shot encoder prune ratio before WER dataset.map (SASPG gates or MAG/str physical)."""
+    reg_type = getattr(getattr(config, "prune_cfg", None), "reg_type", "") or ""
+    prune_kind = prune_kind_from_reg_type(resolve_smoke_reg_type(str(reg_type)))
+    log_encoder_prune_ratio_before_inference(
+        model,
+        logger,
+        prune_kind=prune_kind,
+        reg_type=str(reg_type),
+        eval_dataset=dataset,
+        phase=phase,
+    )
 # seed=1000
 # random.seed(seed)
 # os.environ['PYTHONHASHSEED'] = str(seed)
@@ -250,12 +288,42 @@ def _dataloader_pin_memory_from_env(num_workers: int) -> bool:
     return True
 
 
+def _training_save_strategy(config):
+    """HF save_strategy: MAG finetune-after-prune must save checkpoints even when eval is off."""
+    eval_strategy = config.progress.eval_strategy
+    reg = getattr(getattr(config, "prune_cfg", None), "reg_type", "") or ""
+    if (
+        reg in _SMOKE_REG_ALIASES
+        and str(reg).startswith("mag_")
+        and getattr(config.prune_cfg, "mag_prune_first", False)
+        and config.progress.save_steps
+        and getattr(config.progress, "save_model", False)
+    ):
+        return "steps"
+    return eval_strategy
+
+
 def _make_huggingface_training_args(config):
     """Create Training Arguments as required by HuggingFace Trainer."""
     output_dir = config.base.output_dir
     if output_dir is not None:
         output_dir = os.path.join(output_dir, 'out')
     _nw = _dataloader_num_workers_from_env()
+    _save_strategy = _training_save_strategy(config)
+    _eval_strategy = config.progress.eval_strategy
+    _load_best = config.progress.load_best_model_at_end
+    if _load_best and _save_strategy != _eval_strategy:
+        logger.info(
+            "TrainingArguments: disabling load_best_model_at_end "
+            "(save_strategy=%s != evaluation_strategy=%s)",
+            _save_strategy,
+            _eval_strategy,
+        )
+        _load_best = False
+    _save_safetensors = True
+    if "prune_cfg" in config:
+        # Pruned SASPG/MAG models alias threshold tensors; safetensors save fails.
+        _save_safetensors = False
     args = TrainingArguments(
         # fp16=True, # 7.28 1:30 修正
         length_column_name="input_length",
@@ -281,17 +349,18 @@ def _make_huggingface_training_args(config):
         # warmup_steps=config.training.warmup_steps,
         warmup_ratio=0.1,
         disable_tqdm=not config.progress.tqdm,
-        evaluation_strategy=config.progress.eval_strategy,
+        evaluation_strategy=_eval_strategy,
         eval_steps=config.progress.eval_steps, # if type(config.progress.eval_steps)==int else float(config.progress.eval_steps),
-        save_strategy=config.progress.eval_strategy,
+        save_strategy=_save_strategy,
         logging_first_step=config.progress.logging_first_step,
         logging_steps=config.progress.logging_steps,
         save_steps=config.progress.save_steps, #  if type(config.progress.save_steps)==int else float(config.progress.save_steps),
         save_total_limit=config.progress.save_total_limit,
         run_name=config.progress.run_name,
-        load_best_model_at_end=config.progress.load_best_model_at_end,
+        load_best_model_at_end=_load_best,
         metric_for_best_model=config.progress.metric_for_best_model,
         greater_is_better=config.progress.greater_is_better,
+        save_safetensors=_save_safetensors,
         # lr_scheduler_type='cosine',
     )
     # import pdb;pdb.set_trace()
@@ -440,7 +509,7 @@ def _make_datasets_and_trainer(
     if 'test_other' in datasets.keys():
         test_other_dataset = datasets["test_other"]
     
-    wer_metric = load_metric("wer")
+    wer_metric = _load_wer_metric()
     logger.info('WER_Metric:')    
     
     def compute_metrics(pred):
@@ -605,16 +674,42 @@ def _make_datasets_and_trainer(
                     kl_div_6 = 0
 
                 # Return the total loss and other losses
-                return (total_loss, loss1, loss2, loss3, loss4, loss5, loss6,  loss7, loss8, kl_div, kl_div_1, kl_div_2, kl_div_3, kl_div_4, kl_div_5, kl_div_6, outputs) if return_outputs else (total_loss, loss1, loss2, loss3, loss4, loss5, loss6, loss7, loss8, kl_div, kl_div_1, kl_div_2, kl_div_3, kl_div_4, kl_div_5, kl_div_6)
+                if return_outputs:
+                    return (
+                        total_loss,
+                        loss1,
+                        loss2,
+                        loss3,
+                        loss4,
+                        loss5,
+                        loss6,
+                        loss7,
+                        loss8,
+                        kl_div,
+                        kl_div_1,
+                        kl_div_2,
+                        kl_div_3,
+                        kl_div_4,
+                        kl_div_5,
+                        kl_div_6,
+                        outputs,
+                    )
+                return total_loss
 
         def _save(self, output_dir=None, state_dict=None, **kwargs):
             """Persist HF config.json + full pruned state_dict + prune_sidecar (masks/thresholds)."""
+            if not output_dir:
+                return
             try:
                 super()._save(output_dir=output_dir, state_dict=state_dict, **kwargs)
             except TypeError:
                 super()._save(output_dir, state_dict)
-            if not output_dir:
-                return
+            except RuntimeError as exc:
+                if "share memory" not in str(exc).lower():
+                    raise
+                logger.warning(
+                    "CustomTrainer: safetensors save failed (shared tensors); using pytorch_model.bin only"
+                )
             try:
                 full_sd = self.model.state_dict()
                 torch.save(full_sd, os.path.join(output_dir, "pytorch_model.bin"))
@@ -653,18 +748,39 @@ def _make_datasets_and_trainer(
     return trainer, datasets, train_dataset, eval_dataset, processor
 
 
+def _mag_finetune_skips_prune_wrapper(config) -> bool:
+    """MAG str finetune: structural ``out/pruned/`` is already shape-reduced; no Pruned* wrap."""
+    if not getattr(getattr(config, "prune_cfg", None), "mag_prune_first", False):
+        return False
+    mp = getattr(getattr(config, "model", None), "model_path", None)
+    if not isinstance(mp, str) or not os.path.isdir(mp):
+        return False
+    from utils.hf_models import is_structural_pruned_checkpoint
+
+    return is_structural_pruned_checkpoint(mp)
+
+
 def _prune_model(config, model, model_enum):
+    if _mag_finetune_skips_prune_wrapper(config):
+        logger.info(
+            "mag_prune_first: skip Pruned wrapper; finetune structural ckpt at %s",
+            config.model.model_path,
+        )
+        return model
+
     _smoke_alias = config.prune_cfg.reg_type
     _reg_impl = resolve_smoke_reg_type(
         _smoke_alias, getattr(config.model, "model_name", None)
     )
     config.prune_cfg.nasp_ladder = _smoke_alias == "nasp_str"
+    config.prune_cfg.mag_structural = _smoke_alias == "mag_str"
     PrunedWav2Vec2ForCTC = get_pruned_wav2vec2_model(_reg_impl)
     # suffixes = ['attention', 'out', 'KL', 'MSE','mse', 'FP', '248', 'step2', 'ctc4', 'ctc5', 'noearly', 'thre', 'gumble', '5ctc', 'scale', 'no2', 'base', '111','no4','freeze','fp8','NAS','cnnq','all']
     # if any(config.prune_cfg.reg_type.endswith(suffix) for suffix in suffixes):
     #     config.prune_cfg.reg_type = 'distilctc'
     prune_params = make_prune_params(config)
     prune_params["nasp_ladder"] = getattr(config.prune_cfg, "nasp_ladder", False)
+    prune_params["mag_structural"] = getattr(config.prune_cfg, "mag_structural", False)
     # --value-* Gumbel ladder weights: NASP str only (see run_smoke_nasp).
     if _smoke_alias != "nasp_str":
         for _vk in (
@@ -734,7 +850,6 @@ def set_minmax_prune_ratio(model, max_prune_ratio=0.5, min_prune_ratio=0.0):
             module.max_prune_ratio = max_prune_ratio
         if hasattr(module, 'min_prune_ratio'):
             module.min_prune_ratio = min_prune_ratio
-    
     for name, module in model.named_modules():
         apply_prune_ratio(module)
     
@@ -748,6 +863,13 @@ def set_total_steps(model, total_steps=None):
     for name, module in model.named_modules():
         apply_total_steps(module)
     
+    return model
+
+
+def set_warmup_ratio(model, warmup_ratio=0.1):
+    for module in model.modules():
+        if hasattr(module, 'warmup_ratio'):
+            module.warmup_ratio = warmup_ratio
     return model
 
 def set_hand_ratio(model, hand_ratio=None):
@@ -830,7 +952,7 @@ def _run_task(config, task_data, model_data):
             m.num_layers = num_layers
 
     # Pruning!
-    if 'prune' in config:
+    if 'prune_cfg' in config:
         # replace model with a pruned one
         model = _prune_model(config, model, model_enum)
 
@@ -846,8 +968,11 @@ def _run_task(config, task_data, model_data):
     # Mixed-precision control for weight. pruners
 
 
+    datasets_shared = None
+    _mag_struct_finetune = _mag_finetune_skips_prune_wrapper(config)
+
     # Prepare pruned model for training/validation
-    if 'prune' in config:
+    if "prune_cfg" in config and not _mag_struct_finetune:
         # pass
         # make another trainer with individually controlled padding strategy & batch size for
         # range estimation
@@ -855,7 +980,7 @@ def _run_task(config, task_data, model_data):
         num_batch_size = config.training.batch_size
         config_.training.batch_size = config.prune_cfg.est_ranges_batch_size
         training_args_ = _make_huggingface_training_args(config_)
-        
+
         _, datasets_shared, train_dataset_range, _, _ = _make_datasets_and_trainer(
             config, model, model_enum, tokenizer, task_data, processor, training_args_,
         )
@@ -912,13 +1037,28 @@ def _run_task(config, task_data, model_data):
         # logger.info('after MP model:')
         # logger.info(model)
 
+    elif _mag_struct_finetune:
+        logger.info(
+            "mag_prune_first structural: skip pruner prep; prefetch datasets for Trainer"
+        )
+        gacc = int(config.training.gradient_accumulation_steps or 1)
+        max_steps = int(config.training.max_steps or 0)
+        all_steps = max(max_steps * gacc, 1)
+        model = set_tau_min_max(
+            model, eta_max=config.prune_cfg.eta_max, eta_min=config.prune_cfg.eta_min
+        )
+        model = set_total_steps(model, all_steps)
+        model = set_warmup_ratio(model, warmup_ratio=0.1)
+        _, datasets_shared, _, _, _ = _make_datasets_and_trainer(
+            config, model, model_enum, tokenizer, task_data, processor, training_args,
+        )
     else:
         logger.info('original full precision model:')
         logger.info(model)
-        
+
     # make datasets and Trainer
     _datasets_kw = {}
-    if "prune" in config:
+    if datasets_shared is not None:
         _datasets_kw["datasets_prepared"] = datasets_shared
     trainer, datasets, train_dataset, eval_dataset, processor = _make_datasets_and_trainer(
         config, model, model_enum, tokenizer, task_data, processor, training_args, **_datasets_kw
@@ -965,17 +1105,42 @@ def _run_task(config, task_data, model_data):
     
     if config.training.do_train:
         logger.info('*** Training ***')
-        trainer.train(model_path=model_name_or_path if os.path.isdir(model_name_or_path) else None)
+        _resume_ckpt = None
+        if isinstance(model_name_or_path, str) and os.path.isdir(model_name_or_path):
+            if os.path.isfile(os.path.join(model_name_or_path, "trainer_state.json")):
+                _resume_ckpt = model_name_or_path
+        trainer.train(resume_from_checkpoint=_resume_ckpt)
         
-        if config.training.num_epochs != 0:
-            if config.progress.save_model:
-                trainer.save_model()  # saves the tokenizer too
+        _mag_prune_first = bool(
+            getattr(getattr(config, "prune_cfg", None), "mag_prune_first", False)
+        )
+        if config.progress.save_model and (
+            config.training.num_epochs != 0 or _mag_prune_first
+        ):
+            trainer.save_model()  # saves the tokenizer too
 
-        if "prune" in config and getattr(config.prune_cfg, "channel_pruning", False):
+        if (
+            "prune_cfg" in config
+            and getattr(config.prune_cfg, "channel_pruning", False)
+            and not _mag_prune_first
+        ):
             try:
-                from structural_prune_export import export_structural_prune_posttrain
+                from structural_prune_export import (
+                    export_structural_prune_posttrain,
+                    load_structural_pruned_for_inference,
+                )
 
-                export_structural_prune_posttrain(trainer.model, trainer.model.config, trainer, config)
+                pruned_dir = export_structural_prune_posttrain(
+                    trainer.model, trainer.model.config, trainer, config
+                )
+                if pruned_dir:
+                    _dev = next(trainer.model.parameters()).device
+                    model = load_structural_pruned_for_inference(pruned_dir, device=_dev)
+                    trainer.model = model
+                    logger.info(
+                        "structural_prune_export: using shape-reduced ckpt from %s for eval",
+                        pruned_dir,
+                    )
             except Exception:
                 logger.exception("structural_prune_export failed after train-pruned")
 
@@ -996,7 +1161,7 @@ def _run_task(config, task_data, model_data):
         # no adaround
         logger.info("no adaround:")
         # eval_wer = True
-        eval_wer = True
+        eval_wer = not _smoke_eval_test_only()
         if eval_wer:
             final_score_eval = _eval_task(config, trainer, eval_dataset, datasets, model, processor)
             logger.info(f'Eval clean ASR -> {100. * final_score_eval:.10f}')
@@ -1009,12 +1174,14 @@ def _run_task(config, task_data, model_data):
             WER_result_val_other, WER_result_test_other, WER_result_test_clean = _test_task(config, datasets, model, processor)
             logger.info(f'Test Clean ASR -> {100. * WER_result_test_clean:.10f}')
             logger.info(f'Test Other ASR -> {100. * WER_result_test_other:.10f}')
-            logger.info(f'Eval Other ASR -> {100. * WER_result_val_other:.10f}')
+            if not _smoke_eval_test_only():
+                logger.info(f'Eval Other ASR -> {100. * WER_result_val_other:.10f}')
             # if config.training.do_train:
             with open(os.path.join(config.base.output_dir, 'final_score.txt'), 'a') as f:
                 f.write(f'Test Clean ASR -> {100. * WER_result_test_clean:.10f}\n')
                 f.write(f'Test Other ASR -> {100. * WER_result_test_other:.10f}\n')
-                f.write(f'Eval Other ASR -> {100. * WER_result_val_other:.10f}\n')
+                if not _smoke_eval_test_only():
+                    f.write(f'Eval Other ASR -> {100. * WER_result_val_other:.10f}\n')
 
     return final_score
 
@@ -1035,9 +1202,16 @@ def _eval_task(config, trainer, eval_dataset, datasets ,model, processor):
         # eval_result = trainer.evaluate(eval_dataset=eval_dataset)
         # logger.info(eval_result)
 
-        wer_metric = load_metric("wer")
+        wer_metric = _load_wer_metric()
         logger.info('WER_Metric:')
-        
+
+        _log_encoder_prune_ratio_before_wer_map(
+            config,
+            model,
+            eval_dataset,
+            phase="inference_pre_map_eval_clean",
+        )
+
         """validation clean"""
         _map_to_result = partial(map_to_result, model=model, processor=processor, return_att_mask=False)
         # import pdb;pdb.set_trace()
@@ -1079,12 +1253,25 @@ def _test_task(config, datasets_all ,model, processor):
     # model.precision_levels = [0]
     # subtask_names = [task.name]
     # import pdb;pdb.set_trace()
-    wer_metric = load_metric("wer")
+    wer_metric = _load_wer_metric()
     logger.info('WER_Metric:')
     
     WER_result_val_other, WER_result_test_other, WER_result_test_clean = 0, 0, 0
     _map_to_result = partial(map_to_result, model=model, processor=processor, return_att_mask=False)
-    
+
+    _pre_map_ds = None
+    for _k in ("test_clean", "test_other", "val_other"):
+        if _k in datasets_all.keys() and len(datasets_all[_k]) > 0:
+            _pre_map_ds = datasets_all[_k]
+            break
+    if _pre_map_ds is not None:
+        _log_encoder_prune_ratio_before_wer_map(
+            config,
+            model,
+            _pre_map_ds,
+            phase="inference_pre_map_test",
+        )
+
     if 'test_clean' in datasets_all.keys():
         
         results_test_clean = datasets_all['test_clean'].map(_map_to_result, remove_columns=datasets_all['test_clean'].column_names, load_from_cache_file=False)
@@ -1101,7 +1288,7 @@ def _test_task(config, datasets_all ,model, processor):
         
         logger.info('Test clean WER:{:.10f}'.format(WER_result_test_clean))
         
-    if 'val_other' in datasets_all.keys():
+    if not _smoke_eval_test_only() and 'val_other' in datasets_all.keys():
         
         results_val_other = datasets_all['val_other'].map(_map_to_result, remove_columns=datasets_all['val_other'].column_names, load_from_cache_file=False)
 

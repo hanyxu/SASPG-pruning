@@ -2,6 +2,7 @@
 # author: Haoning XU
 # modified: 2023-10-7
 
+import logging
 import math
 import warnings
 # import torch.nn.functional as F
@@ -31,7 +32,6 @@ from transformers.models.wav2vec2.modeling_wav2vec2 import (
     Wav2Vec2EncoderLayer,
     Wav2Vec2AdapterLayer,
     Wav2Vec2EncoderLayerStableLayerNorm,
-    Wav2Vec2GumbelVectorPruner, # how to do
     BaseModelOutput, # used: Wav2Vec2Encoder --> wav2vec2model
     # Wav2vec2BaseModelOutput # used: wav2vec2model
     # Wav2vec2BaseModelOutput does not inherit from BaseModelOutput
@@ -45,6 +45,15 @@ from pruning.autoprune_utils import prune_model
 from pruning.base_pruned_model import PrunedModel
 
 from pruning.range_estimators import RangeEstimators, OptMethod
+from utils.prune_ratio_utils import (
+    encoder_attn_ff_exact_size_from_backbone,
+    encoder_attn_ff_gate_loss_prune_from_backbone,
+    encoder_attn_ff_prune_ratio,
+    log_pruned_ctc_loss_breakdown,
+    minmax_gate_prune_loss,
+)
+
+logger = logging.getLogger(__name__)
 # from utils import _tb_advance_global_step, _tb_advance_token_counters, _tb_hist
 
 """from anonymized_compression_package.pruning.straight_through import (
@@ -1633,8 +1642,9 @@ class PrunedWav2Vec2ForCTC(PrunedModel):
         # self.get_gate_loss
         # import pdb;pdb.set_trace()
                 
-        size_loss = self.wav2vec2.get_gate_loss_prune()
-        
+        self.exact_size = encoder_attn_ff_exact_size_from_backbone(self.wav2vec2)
+        size_loss = encoder_attn_ff_gate_loss_prune_from_backbone(self.wav2vec2)
+
         if not isinstance(size_loss, float):
             size_loss = size_loss.to('cuda')
         # KL_loss = self.wav2vec2.get_gate_loss_KL()
@@ -1643,12 +1653,12 @@ class PrunedWav2Vec2ForCTC(PrunedModel):
             distil_loss = self.wav2vec2.get_gate_loss_disweight()
         elif self.reg_type == 'disweightout':
             distil_loss = self.wav2vec2.get_gate_loss_disweightout()
-        
-        self.exact_size = self.wav2vec2.get_exact_size_prune()
         # self.exact_size = 0.
         # self.exact_bit = round(float(self.exact_size)/self.sum_shape, 2)
         
-        self.exact_prune_ratio = float(self.exact_size)/self.sum_shape
+        self.exact_prune_ratio = encoder_attn_ff_prune_ratio(
+            self.exact_size, self.sum_shape
+        )
         # import pdb;pdb.set_trace()
         # threshold_all = self.wav2vec2.get_threshold_all()
         
@@ -1739,49 +1749,46 @@ class PrunedWav2Vec2ForCTC(PrunedModel):
             # print('self.exact_bit',self.exact_bit)
 
 
-        if not (self.fix_prob or self.mag_prune): 
-            # l1_loss = size_loss - self.max_prune_ratio * self.sum_shape
-            # l2_loss = (size_loss - self.max_prune_ratio * self.sum_shape)**2
-            # self.loss = ctc_q_loss + self.lmb * l1_loss + self.lmb_dis * l2_loss
-            
-            if self.exact_prune_ratio > self.max_prune_ratio: # 2024-7-7 23:48 4.2-> 3.9
-                self.loss = ctc_q_loss  + self.lmb * size_loss + self.lmb_dis * (KL_loss)
-            elif self.exact_prune_ratio < self.min_prune_ratio:
-                self.loss = ctc_q_loss  - self.lmb * size_loss + self.lmb_dis * (KL_loss)
-            elif self.exact_prune_ratio <= self.max_prune_ratio and self.exact_prune_ratio >= self.min_prune_ratio:
-                self.loss = ctc_q_loss + self.lmb_dis * (KL_loss)
-            else:
-                raise NotImplementedError()
+        loss_formula = None
+        if not (self.fix_prob or self.mag_prune):
+            self.loss, loss_formula = minmax_gate_prune_loss(
+                ctc_q_loss,
+                size_loss,
+                self.lmb,
+                float(self.exact_prune_ratio),
+                float(self.min_prune_ratio),
+                float(self.max_prune_ratio),
+            )
         else:
-            self.loss = ctc_q_loss + self.lmb * size_loss + self.lmb_dis * (KL_loss)
-        
-        # self.loss = ctc_q_loss + self.lmb * size_loss
-            # else:
-            #     # self.wav2vec2.fix_threshold()
-            #     if self.freeze_thre == 0:
-            #         for name, param in self.named_parameters():
-            #             # print(name)
-            #             if "threshold" in name:
-            #                 param.requires_grad = False
-            #             else:
-            #                 param.requires_grad = True
-            #         self.freeze_thre = 1
-            #     size_loss = 0
-            #     self.loss = ctc_q_loss + self.lmb_dis * (distil_loss)
-        # import pdb;pdb.set_trace()
-        if self.current_steps % 500 == 0:
-            print(f'exact prune ratio: {self.exact_prune_ratio}, ctc loss:{ctc_q_loss}, size loss:{self.lmb * size_loss}, sum loss:{self.loss}')
+            loss_formula = (
+                "fix_prob_or_mag_prune: loss = ctc_q_loss + lmb * size_loss "
+                "(size_loss forced to 0 in this branch)"
+            )
+            self.loss = ctc_q_loss + self.lmb * size_loss
 
-        self.current_steps+=1
-        
-        # if not self.training and self.calib < self.num_acts:
-        #     print('Calibrate ... ')
-        #     self.calib += 1
-        if not self.training:
-            self.current_steps += 1
-            if self.current_steps % 500 == 0 and self.current_steps > 0:
-                print('self.exact_prune_ratio:', self.exact_prune_ratio)
-                  
+        if labels is not None and loss_list[0] is not None and self.loss is not None:
+            log_i = getattr(self, "_pruned_ctc_loss_log_i", 0) + 1
+            self._pruned_ctc_loss_log_i = log_i
+            if log_i % 100 == 1:
+                log_pruned_ctc_loss_breakdown(
+                    logger,
+                    "PrunedWav2Vec2ForCTC",
+                    prune_kind="unstr",
+                    ctc_q_loss=ctc_q_loss,
+                    lmb=self.lmb,
+                    size_loss=size_loss,
+                    total_loss=self.loss,
+                    exact_size=float(self.exact_size),
+                    sum_shape=float(self.sum_shape),
+                    exact_prune_ratio=float(self.exact_prune_ratio),
+                    min_prune_ratio=float(self.min_prune_ratio),
+                    max_prune_ratio=float(self.max_prune_ratio),
+                    loss_formula=loss_formula,
+                    phase="train" if self.training else "eval",
+                )
+
+        self.current_steps += 1
+
         return {
                 'loss': self.loss,
                 # 'loss1': ctc_q_loss,

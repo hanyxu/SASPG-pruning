@@ -109,80 +109,71 @@ run_smoke_nasp() {
     --greater-is-better False --eval-strategy steps --max-steps "$MAX_STEPS"
 }
 
-# --- Magnitude: shared stage1 + optional structural export + stage2 ---
-_smoke_mag_stage1() {
-  local out="$1" backbone="$2" sp="$3"
-  smoke_sparsity_ratios "$sp" || return 1
-  smoke_train_batch "$backbone" || return 1
-  local mname reg
-  mname="$(smoke_model_name "$backbone")" || return 1
-  reg="$(smoke_reg_type_alias mag unstr "$backbone")"
-
-  mkdir -p "$out"
-  "$PYTHON" "$ROOT/main_prune.py" train-pruned \
-    --cuda --logging-first-step --mag-prune --hand-ratio "$SMOKE_MAX_PRUNE" \
-    --hard --decay-tau --only-size-hard \
-    --max-prune-ratio "$SMOKE_MAX_PRUNE" --min-prune-ratio "$SMOKE_MIN_PRUNE" \
-    --no-weight-prune --batch-size "$SMOKE_BS" --seed 1000 --model-name "$mname" \
-    --learning-rate 2e-4 --gating-lambda 2e-5 --gating-dis 0. --reg-type "$reg" \
-    --num-epochs 0 --output-dir "$out" --gradient-accumulation-steps "$SMOKE_GACC" \
-    --save-model --save-steps "$MAG_PRUNE_STEPS" --save-total-limit 1 \
-    --eval-steps "$MAG_PRUNE_STEPS" --metric-for-best-model eval_wer \
-    --load-best-model-at-end --greater-is-better False --eval-strategy steps \
-    --max-steps "$MAG_PRUNE_STEPS"
+# --- Magnitude: prune-first (mag_asr_prune_export) -> single finetune (mag_prune_first) ---
+_smoke_mag_baseline_dir() {
+  local backbone="$1"
+  case "$backbone" in
+    w2v)    echo "${ASR_W2V_MODEL_PATH:-${ROOT}/hf_models/wav2vec2-base-100h}" ;;
+    hubert) echo "${ASR_HUBERT_MODEL_PATH}" ;;
+    *) return 1 ;;
+  esac
 }
 
-_smoke_mag_stage2() {
-  local out="$1" backbone="$2" sp="$3" model_path="$4"
+_smoke_mag_prune_export() {
+  local out="$1" backbone="$2" sp="$3" mode="$4"
+  smoke_sparsity_ratios "$sp" || return 1
+  local mname baseline
+  mname="$(smoke_model_name "$backbone")" || return 1
+  baseline="$(_smoke_mag_baseline_dir "$backbone")" || return 1
+  [[ -d "$baseline" ]] || { echo "FAILED mag_${mode}: missing baseline $baseline" >&2; return 1; }
+  mkdir -p "$out"
+  "$PYTHON" "$ROOT/mag_asr_prune_export.py" \
+    --mode "$mode" --model-name "$mname" \
+    --baseline-dir "$baseline" --output-dir "$out" \
+    --prune-ratio "$SMOKE_MAX_PRUNE"
+}
+
+_smoke_mag_finetune() {
+  local out="$1" backbone="$2" sp="$3" mode="$4"
   smoke_sparsity_ratios "$sp" || return 1
   smoke_train_batch "$backbone" || return 1
-  local mname reg stage2_out
+  local mname reg pruned_ckpt
   mname="$(smoke_model_name "$backbone")" || return 1
   reg="$(smoke_reg_type_alias mag unstr "$backbone")"
-  stage2_out="$out/stage2"
-  mkdir -p "$out"
+  pruned_ckpt="$out/out/pruned"
+  [[ -d "$pruned_ckpt" ]] || { echo "FAILED mag_${mode}: missing $pruned_ckpt" >&2; return 1; }
 
+  local -a mag_extra=(--mag-prune-first)
+  if [[ "$mode" == "unstr" ]]; then
+    mag_extra+=(--mag-prune --hand-ratio "$SMOKE_MAX_PRUNE")
+  else
+    mag_extra+=(--fix-prob)
+  fi
+
+  mkdir -p "$out"
   "$PYTHON" "$ROOT/main_prune.py" train-pruned \
-    --cuda --logging-first-step --mag-prune --hand-ratio "$SMOKE_MAX_PRUNE" \
-    --hard --fix-prob --decay-tau --only-size-hard \
+    --cuda --logging-first-step --hard --decay-tau --only-size-hard \
     --max-prune-ratio "$SMOKE_MAX_PRUNE" --min-prune-ratio "$SMOKE_MIN_PRUNE" \
     --no-weight-prune --batch-size "$SMOKE_BS" --seed 1000 --model-name "$mname" \
-    --model-path "$model_path" --learning-rate 2e-4 --gating-lambda 2e-5 --gating-dis 0. \
-    --reg-type "$reg" --num-epochs 0 --output-dir "$stage2_out" \
+    --model-path "$pruned_ckpt" --learning-rate 2e-4 --gating-lambda 2e-5 --gating-dis 0. \
+    --reg-type "$reg" --num-epochs 0 --output-dir "$out" \
     --gradient-accumulation-steps "$SMOKE_GACC" --save-model \
     --save-steps "$MAX_STEPS" --save-total-limit 1 --eval-steps "$MAX_STEPS" \
     --metric-for-best-model eval_wer --load-best-model-at-end \
-    --greater-is-better False --eval-strategy steps --max-steps "$MAX_STEPS"
+    --greater-is-better False --eval-strategy steps --max-steps "$MAX_STEPS" \
+    ${mag_extra[@]+"${mag_extra[@]}"}
 }
 
-_smoke_mag_structural_export() {
-  local ckpt="$1" backbone="$2"
-  if [[ "$backbone" == "w2v" ]]; then
-    "$PYTHON" "$ROOT/prune_ASR_w2v_mag.py" --orig_dir "$ckpt"
-  else
-    "$PYTHON" "$ROOT/prune_ASR_hubert_mag.py" --orig_dir "$ckpt"
-  fi
-}
-
-# unstr: mask×weight only — no structural prune_ASR (no smaller shapes in pruned/)
 run_smoke_mag_unstr() {
   local out="$1" backbone="$2" sp="$3"
-  _smoke_mag_stage1 "$out" "$backbone" "$sp" || return 1
-  local ckpt="$out/out/checkpoint-${MAG_PRUNE_STEPS}"
-  [[ -d "$ckpt" ]] || { echo "FAILED mag_unstr: missing $ckpt" >&2; return 1; }
-  _smoke_mag_stage2 "$out" "$backbone" "$sp" "$ckpt"
+  _smoke_mag_prune_export "$out" "$backbone" "$sp" unstr || return 1
+  _smoke_mag_finetune "$out" "$backbone" "$sp" unstr
 }
 
-# str: offline structural export -> finetune from checkpoint-*/pruned/
 run_smoke_mag_str() {
   local out="$1" backbone="$2" sp="$3"
-  _smoke_mag_stage1 "$out" "$backbone" "$sp" || return 1
-  local ckpt="$out/out/checkpoint-${MAG_PRUNE_STEPS}"
-  [[ -d "$ckpt" ]] || { echo "FAILED mag_str: missing $ckpt" >&2; return 1; }
-  _smoke_mag_structural_export "$ckpt" "$backbone" || return 1
-  local mpath="$ckpt/pruned"
-  [[ -d "$mpath" ]] || { echo "FAILED mag_str: missing $mpath" >&2; return 1; }
-  _smoke_mag_stage2 "$out" "$backbone" "$sp" "$mpath"
+  _smoke_mag_prune_export "$out" "$backbone" "$sp" str || return 1
+  _smoke_mag_finetune "$out" "$backbone" "$sp" str
 }
 
 # Dispatch one cell: METHOD MODE BACKBONE SPARSITY_TAG OUT_DIR

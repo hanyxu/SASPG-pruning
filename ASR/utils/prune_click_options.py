@@ -91,6 +91,11 @@ def pruning_options(func):
     @click.option('--fix-prob', is_flag=True, help='If given, fix prob.')
     
     @click.option('--mag-prune', is_flag=True, help='If given, fix prob.')
+    @click.option(
+        '--mag-prune-first',
+        is_flag=True,
+        help='MAG: prune export already done; single finetune only (skip post-train structural export).',
+    )
     @click.option('--hand-ratio', default=0.15, type=float, help='manually decided pruning ratio.')
     
     @click.option('--hard', is_flag=True, help='If given, gumble softmax is hard')
@@ -172,6 +177,7 @@ def pruning_options(func):
         'hard',
         'fix_prob',
         'mag_prune',
+        'mag_prune_first',
         'hand_ratio',
         'single_bit',
         'total_steps',

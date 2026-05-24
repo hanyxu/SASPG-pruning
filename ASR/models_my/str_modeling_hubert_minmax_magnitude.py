@@ -35,7 +35,7 @@ from transformers.deepspeed import is_deepspeed_zero3_enabled
 from transformers.activations import ACT2FN
 from transformers.modeling_outputs import BaseModelOutput, CausalLMOutput, SequenceClassifierOutput
 from transformers.modeling_utils import PreTrainedModel
-from transformers.pytorch_utils import torch_int_div
+from utils.transformers_compat import torch_int_div
 from transformers.utils import (
     add_code_sample_docstrings,
     add_start_docstrings,
@@ -47,6 +47,10 @@ from transformers.models.hubert.configuration_hubert import HubertConfig
 from .pruning_utils import prune_linear_layer
 
 import torch.nn.functional as F
+
+logger = logging.get_logger(__name__)
+
+_CONFIG_FOR_DOC = "HubertConfig"
 
 # Copied from transformers.models.wav2vec2.modeling_wav2vec2._compute_mask_indices
 def _compute_mask_indices(
@@ -110,7 +114,7 @@ def _compute_mask_indices(
     )
 
     # SpecAugment mask to fill
-    spec_aug_mask = np.zeros((batch_size, sequence_length), dtype=np.bool)
+    spec_aug_mask = np.zeros((batch_size, sequence_length), dtype=np.bool_)
     spec_aug_mask_idxs = []
 
     max_num_masked_span = compute_num_masked_span(sequence_length)
@@ -465,6 +469,8 @@ class HubertAttention(nn.Module):
             
             if self.eta_max == self.eta_min:
                 self.tau = self.eta_max
+            elif not self.total_steps or self.warmup_ratio is None:
+                self.tau = self.eta_max
             else:
                 progress = self.current_steps / self.total_steps
                 warmup = progress <= self.warmup_ratio
@@ -574,56 +580,48 @@ class HubertAttention(nn.Module):
             )
 
         attn_output = attn_output.view(bsz, self.num_heads, tgt_len, self.head_dim)
-        
-        w_q = self.q_proj.weight
-        w_k = self.k_proj.weight
-        w_v = self.v_proj.weight
-        w_out = self.out_proj.weight
-        
-        self.sum_channel_score = (w_q**2).sum(dim=1) + (w_k**2).sum(dim=1) + (w_v**2).sum(dim=1) + (w_out**2).sum(dim=0)
-        self.sum_channel_score = self.sum_channel_score.reshape(self.num_heads, -1, 1).sum(dim=1)
 
-        if not hasattr(self, "fixed_mask") and not self.mag_pruned:
-            # 计算需要保留的 channel 数量
-            # import pdb;pdb.set_trace()
-            num_channels = self.sum_channel_score.size(0)
-            if self.all_prune_ratio == 0.1:
-                num_keep = 2
-            elif self.all_prune_ratio == 0.2:
-                num_keep = 3
-            elif self.all_prune_ratio == 0.3:
-                num_keep = 5
-            elif self.all_prune_ratio == 0.4:
-                num_keep = 6
-            elif self.all_prune_ratio == 0.5:
-                num_keep = 8
-            else:
-                num_keep = round(num_channels * (self.all_prune_ratio)) # 保留的 channel 数量
+        if self.prune_heads:
+            w_q = self.q_proj.weight
+            w_k = self.k_proj.weight
+            w_v = self.v_proj.weight
+            w_out = self.out_proj.weight
 
-            # 对 channel 的 magnitude 进行排序，获取排序后的索引
-            _, sorted_indices = torch.sort(self.sum_channel_score.squeeze(-1), descending=True)
+            self.sum_channel_score = (w_q**2).sum(dim=1) + (w_k**2).sum(dim=1) + (w_v**2).sum(dim=1) + (w_out**2).sum(dim=0)
+            self.sum_channel_score = self.sum_channel_score.reshape(self.num_heads, -1, 1).sum(dim=1)
 
-            # 保留前 num_keep 个 channel，其余的 mask 掉
-            self.fixed_mask = torch.zeros_like(self.sum_channel_score, dtype=torch.bool)
-            self.fixed_mask[sorted_indices[:num_keep]] = True
+            if not hasattr(self, "fixed_mask") and not self.mag_pruned:
+                num_channels = self.sum_channel_score.size(0)
+                if self.all_prune_ratio == 0.1:
+                    num_keep = 2
+                elif self.all_prune_ratio == 0.2:
+                    num_keep = 3
+                elif self.all_prune_ratio == 0.3:
+                    num_keep = 5
+                elif self.all_prune_ratio == 0.4:
+                    num_keep = 6
+                elif self.all_prune_ratio == 0.5:
+                    num_keep = 8
+                else:
+                    num_keep = round(num_channels * (self.all_prune_ratio))
 
-            
-            self.compiled_mask = self.fixed_mask
+                _, sorted_indices = torch.sort(self.sum_channel_score.squeeze(-1), descending=True)
 
-            self.fixed_mask = self.fixed_mask.squeeze(-1)
+                self.fixed_mask = torch.zeros_like(self.sum_channel_score, dtype=torch.bool)
+                self.fixed_mask[sorted_indices[:num_keep]] = True
 
-            self.mask_channel = self.fixed_mask
+                self.compiled_mask = self.fixed_mask
 
-            self.mag_pruned.fill_(1.)
+                self.fixed_mask = self.fixed_mask.squeeze(-1)
 
-        # 计算实际的 prune_ratio
-        self.prune_ratio = 1.0 - torch.sum(self.fixed_mask).float() / self.fixed_mask.numel()
-        # print('Attn Prune ratio:', self.prune_ratio.item())
+                self.mask_channel = self.fixed_mask
 
-            
-        attn_output = attn_output * self.fixed_mask.unsqueeze(-1).unsqueeze(-1)
+                self.mag_pruned.fill_(1.)
 
-                
+            self.prune_ratio = 1.0 - torch.sum(self.fixed_mask).float() / self.fixed_mask.numel()
+
+            attn_output = attn_output * self.fixed_mask.unsqueeze(-1).unsqueeze(-1)
+
         attn_output = attn_output.transpose(1, 2)
 
         # Use the `embed_dim` from the config (stored in the class) rather than `hidden_state` because `attn_output` can be
@@ -754,6 +752,8 @@ class HubertFeedForward(nn.Module):
             
             if self.eta_max == self.eta_min:
                 self.tau = self.eta_max
+            elif not self.total_steps or self.warmup_ratio is None:
+                self.tau = self.eta_max
             else:
                 progress = self.current_steps / self.total_steps
                 warmup = progress <= self.warmup_ratio
@@ -774,51 +774,35 @@ class HubertFeedForward(nn.Module):
         hidden_states = self.intermediate_act_fn(hidden_states)
         hidden_states = self.intermediate_dropout(hidden_states)
 
-        w_in = self.intermediate_dense.weight
-        w_out = self.output_dense.weight
+        if self.prune_intermediate:
+            w_in = self.intermediate_dense.weight
+            w_out = self.output_dense.weight
 
-        self.sum_channel_score = (w_in**2).sum(dim=1) + (w_out**2).sum(dim=0)
+            self.sum_channel_score = (w_in**2).sum(dim=1) + (w_out**2).sum(dim=0)
 
-        if not hasattr(self, "fixed_mask") and not self.mag_pruned:
-            # print('FFN first forward')
-            # 计算需要保留的 channel 数量
-            # import pdb;pdb.set_trace()
-            num_channels = self.sum_channel_score.size(0)
-            # 104934 att keep more
-            # 839270 keep - 104934 = 734336
-            relative_ratio = 0.500122
-            realative_head_gap = float(round(16 * (self.all_prune_ratio)) - 16 * (self.all_prune_ratio))/16
-                
-            self.all_prune_ratio = self.all_prune_ratio - relative_ratio*realative_head_gap
-                    
-            # if self.all_prune_ratio==0.1:
-            #     num_keep = round(num_channels * (0.0874))
-            # elif self.all_prune_ratio == 0.2:
-            #     num_keep = 3
-            # elif self.all_prune_ratio == 0.3:
-            #     num_keep = 5
-            # elif self.all_prune_ratio == 0.4:
-            #     num_keep = 6
-            # else:
-            num_keep = round(num_channels * (self.all_prune_ratio))  # 保留的 channel 数量
+            if not hasattr(self, "fixed_mask") and not self.mag_pruned:
+                num_channels = self.sum_channel_score.size(0)
+                relative_ratio = 0.500122
+                realative_head_gap = float(round(16 * (self.all_prune_ratio)) - 16 * (self.all_prune_ratio))/16
 
-            # 对 channel 的 magnitude 进行排序，获取排序后的索引
-            _, sorted_indices = torch.sort(self.sum_channel_score, descending=True)
+                self.all_prune_ratio = self.all_prune_ratio - relative_ratio*realative_head_gap
 
-            # 保留前 num_keep 个 channel，其余的 mask 掉
-            self.fixed_mask = torch.zeros_like(self.sum_channel_score, dtype=torch.bool)
-            self.fixed_mask[sorted_indices[:num_keep]] = True
+                num_keep = round(num_channels * (self.all_prune_ratio))
 
+                _, sorted_indices = torch.sort(self.sum_channel_score, descending=True)
 
-            self.compiled_mask = self.fixed_mask
+                self.fixed_mask = torch.zeros_like(self.sum_channel_score, dtype=torch.bool)
+                self.fixed_mask[sorted_indices[:num_keep]] = True
 
-            self.mask_channel = self.fixed_mask
+                self.compiled_mask = self.fixed_mask
 
-            self.mag_pruned.fill_(1.)
+                self.mask_channel = self.fixed_mask
 
-        self.prune_ratio = torch.sum(self.mask_channel == 1.).float() / self.mask_channel.numel()
+                self.mag_pruned.fill_(1.)
 
-        hidden_states = hidden_states * self.compiled_mask
+            self.prune_ratio = torch.sum(self.mask_channel == 1.).float() / self.mask_channel.numel()
+
+            hidden_states = hidden_states * self.compiled_mask
 
         hidden_states = self.output_dense(hidden_states)
                 
@@ -1469,7 +1453,7 @@ class HubertForCTC(HubertPreTrainedModel):
         self.all_prune_ratio = 0
         self.warmup_ratio = None
         self.eval_steps = 0
-        self.cur_target_sparsity  = None
+        self.cur_target_prune_ratio = None
 
         self.minmax_gap = None
         self.lmb = None
@@ -1579,13 +1563,47 @@ class HubertForCTC(HubertPreTrainedModel):
     
         return total_params
 
-    def get_target_sparsity(self):
+    def get_target_prune_ratio(self):
+        """Scheduled target prune ratio (same scale as spXX / max_prune_ratio)."""
+        if getattr(self, "already_pruned", False) or self.all_prune_ratio == 0:
+            return 0.0
         if self.current_steps >= self.warmup_ratio * self.total_steps:
-            return (1 - self.all_prune_ratio)
-        return (1 - self.all_prune_ratio) * (self.current_steps / (self.warmup_ratio * self.total_steps))
-        
+            return float(self.all_prune_ratio)
+        return float(self.all_prune_ratio) * (
+            self.current_steps / (self.warmup_ratio * self.total_steps)
+        )
+
+    def get_target_sparsity(self):
+        """Backward-compatible alias; returns target **prune** ratio, not retention."""
+        return self.get_target_prune_ratio()
+
     def get_total_params(self):
         return sum(p.numel() for p in self.parameters())
+
+    def _param_prune_ratios(self):
+        """Full-model and encoder-transformer prune ratios vs nominal dense."""
+        from .structural_encoder_param_stats import encoder_dense_attn_ff_param_total
+
+        current_total = sum(p.numel() for p in self.parameters())
+        current_enc_tf = int(self.get_encoder_params())
+        dense_enc_tf = encoder_dense_attn_ff_param_total(self.config)
+        if dense_enc_tf is None or dense_enc_tf <= 0:
+            d = float(max(current_total, 1))
+            e = float(max(current_enc_tf, 1))
+            return 0.0, 0.0, float(current_total), d, float(current_enc_tf), e
+        non_enc = float(current_total - current_enc_tf)
+        dense_total = non_enc + float(dense_enc_tf)
+        pr_full = (
+            max(0.0, min(1.0, 1.0 - float(current_total) / dense_total))
+            if dense_total > 0
+            else 0.0
+        )
+        pr_enc = (
+            max(0.0, min(1.0, 1.0 - float(current_enc_tf) / float(dense_enc_tf)))
+            if dense_enc_tf > 0
+            else 0.0
+        )
+        return pr_full, pr_enc, float(current_total), dense_total, float(current_enc_tf), float(dense_enc_tf)
 
     # @auto_docstring
     def forward(
@@ -1625,14 +1643,16 @@ class HubertForCTC(HubertPreTrainedModel):
         # print('self.lambda1:',self.lambda1, self.lambda2)
         loss = None
         ctc_loss = None
-        self.cur_target_sparsity = self.get_target_sparsity()
-        
+        if labels is not None and not getattr(self, "already_pruned", False):
+            self.cur_target_prune_ratio = self.get_target_prune_ratio()
+        else:
+            self.cur_target_prune_ratio = 0.0
+
         trans_params = self.get_trans_param_str()
-            
+
         conv_params = self.total_params - self.all_trans_params
         current_params = conv_params + trans_params
-        # current_sparsity = 1 - current_params / self.total_params
-        current_sparsity = 1 - trans_params / self.all_trans_params
+        current_trans_prune_ratio = 1 - trans_params / self.all_trans_params
         # import pdb;pdb.set_trace()
         # for name, param in self.named_parameters():
         #     if param.requires_grad and 'lambda' in name:
@@ -1698,21 +1718,59 @@ class HubertForCTC(HubertPreTrainedModel):
             if self.current_steps % 100 == 0:
                 if self.total_steps == 0:
                     self.total_steps = 1
+                (
+                    pr_full,
+                    pr_enc,
+                    cur_tot,
+                    dense_tot,
+                    cur_enc,
+                    dense_enc,
+                ) = self._param_prune_ratios()
+                prune_msg = (
+                    f"full_model_prune_ratio={pr_full:.6f} "
+                    f"(1 - current_all_params/dense_model_params; "
+                    f"current={cur_tot:.0f} dense≈{dense_tot:.0f}), "
+                    f"encoder_transformer_attn_ff_prune_ratio={pr_enc:.6f} "
+                    f"(1 - current_encoder_tf/dense_encoder_tf; "
+                    f"current={cur_enc:.0f} dense={dense_enc:.0f}), "
+                )
                 logger.info(
                     f'str_export stage2:{self.already_pruned} TRAIN - '
-                    f'cur_target_sparsity: {self.cur_target_sparsity}, cur_sparsity: {current_sparsity}, '
+                    f'cur_target_prune_ratio(schedule): {self.cur_target_prune_ratio:.6f}, '
+                    f'{prune_msg}'
+                    f'current_trans_prune_ratio={current_trans_prune_ratio:.6f} '
+                    f'(1 - trans_params/all_trans_params), '
                     f'ctc loss:{ctc_loss}, sum loss:{loss}, current_parms:{current_params}, '
                     f'total_params:{self.total_params}, lmbda1:{self.lambda1}, '
                     f'lmbda2:{self.lambda2}, '
                     f'current_steps/total_steps:{self.current_steps/self.total_steps:.2%}'
                 )
         else:
-            if self.eval_steps % 500 == 0:  
+            if self.eval_steps % 500 == 0:
                 if self.total_steps == 0:
                     self.total_steps = 1
+                (
+                    pr_full,
+                    pr_enc,
+                    cur_tot,
+                    dense_tot,
+                    cur_enc,
+                    dense_enc,
+                ) = self._param_prune_ratios()
+                prune_msg = (
+                    f"full_model_prune_ratio={pr_full:.6f} "
+                    f"(1 - current_all_params/dense_model_params; "
+                    f"current={cur_tot:.0f} dense≈{dense_tot:.0f}), "
+                    f"encoder_transformer_attn_ff_prune_ratio={pr_enc:.6f} "
+                    f"(1 - current_encoder_tf/dense_encoder_tf; "
+                    f"current={cur_enc:.0f} dense={dense_enc:.0f}), "
+                )
                 logger.info(
                     f'str_export stage2:{self.already_pruned} EVAL - '
-                    f'cur_target_sparsity: {self.cur_target_sparsity}, cur_sparsity: {current_sparsity}, '
+                    f'{"" if self.already_pruned else f"cur_target_prune_ratio(schedule): {self.cur_target_prune_ratio:.6f}, "}'
+                    f'{prune_msg}'
+                    f'current_trans_prune_ratio={current_trans_prune_ratio:.6f} '
+                    f'(1 - trans_params/all_trans_params), '
                     f'ctc loss:{ctc_loss}, sum loss:{loss}, current_parms:{current_params}, '
                     f'total_params:{self.total_params}, lmbda1:{self.lambda1}, '
                     f'lmbda2:{self.lambda2}, '

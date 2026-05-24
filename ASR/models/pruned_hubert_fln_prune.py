@@ -2,6 +2,7 @@
 # author: Haoning XU
 # modified: 2023-10-7
 
+import logging
 import math
 import warnings
 # import torch.nn.functional as F
@@ -17,7 +18,7 @@ import sys
 # sys.path.append('/project_bdda7/bdda/hnxu/miniconda3/envs/prune_wav/lib/python3.8/site-packages/transformers')
 # from deepspeed import is_deepspeed_zero3_enabled
 from transformers.modeling_outputs import Wav2Vec2BaseModelOutput
-from transformers.pytorch_utils import torch_int_div
+from utils.transformers_compat import torch_int_div
 
 from transformers.models.wav2vec2.modeling_wav2vec2 import (
     # BertLayer,
@@ -31,7 +32,6 @@ from transformers.models.wav2vec2.modeling_wav2vec2 import (
     Wav2Vec2EncoderLayer,
     Wav2Vec2AdapterLayer,
     Wav2Vec2EncoderLayerStableLayerNorm,
-    Wav2Vec2GumbelVectorPruner, # how to do
     BaseModelOutput, # used: Wav2Vec2Encoder --> wav2vec2model
     # Wav2vec2BaseModelOutput # used: wav2vec2model
     # Wav2vec2BaseModelOutput does not inherit from BaseModelOutput
@@ -46,6 +46,15 @@ from pruning.base_pruned_classes import PrunedActivation, FP32Acts
 from pruning.base_pruned_model import PrunedModel, PrunedFromPretrainModel
 
 from pruning.range_estimators import RangeEstimators, OptMethod
+from utils.prune_ratio_utils import (
+    encoder_attn_ff_exact_size_from_backbone,
+    encoder_attn_ff_gate_loss_prune_from_backbone,
+    encoder_attn_ff_prune_ratio,
+    log_pruned_ctc_loss_breakdown,
+    minmax_gate_prune_loss,
+)
+
+logger = logging.getLogger(__name__)
 # from utils import _tb_advance_global_step, _tb_advance_token_counters, _tb_hist
 from transformers.models.hubert.configuration_hubert import HubertConfig
 
@@ -117,7 +126,7 @@ def _compute_mask_indices(
     )
 
     # SpecAugment mask to fill
-    spec_aug_mask = np.zeros((batch_size, sequence_length), dtype=np.bool)
+    spec_aug_mask = np.zeros((batch_size, sequence_length), dtype=np.bool_)
     spec_aug_mask_idxs = []
 
     max_num_masked_span = compute_num_masked_span(sequence_length)
@@ -1277,7 +1286,9 @@ class PrunedHubertForCTC(PrunedHubertPreTrainedModel):
         
         # import pdb;pdb.set_trace()
         # import pdb;pdb.set_trace()
-        
+        from utils.transformers_compat import force_eager_attn_config
+
+        force_eager_attn_config(org_model.config)
         super().__init__(org_model.config)
         
         # self.layer_id = getattr(org_model, 'layer_id', None)
@@ -1700,8 +1711,9 @@ class PrunedHubertForCTC(PrunedHubertPreTrainedModel):
         # assert not logits_list[1].equal(logits_list[0])
         # self.get_gate_loss
         # import pdb;pdb.set_trace()
-        size_loss = self.hubert.get_gate_loss_prune()
-        
+        self.exact_size = encoder_attn_ff_exact_size_from_backbone(self.hubert)
+        size_loss = encoder_attn_ff_gate_loss_prune_from_backbone(self.hubert)
+
         # if self.first_round:
         #     self.hubert.get_gate_loss_direct()
         #     print('size_loss all',self.hubert.get_gate_loss_direct())
@@ -1723,8 +1735,9 @@ class PrunedHubertForCTC(PrunedHubertPreTrainedModel):
         elif self.reg_type == 'disweightout':
             distil_loss = self.hubert.get_gate_loss_disweightout()
         
-        self.exact_size = self.hubert.get_exact_size_prune()
-        self.exact_prune_ratio = float(self.exact_size)/self.sum_shape
+        self.exact_prune_ratio = encoder_attn_ff_prune_ratio(
+            self.exact_size, self.sum_shape
+        )
         # print('self.exact_bit',self.exact_bit)
         # threshold_all = self.hubert.get_threshold_all()
         
@@ -1807,35 +1820,47 @@ class PrunedHubertForCTC(PrunedHubertPreTrainedModel):
             # ctc_2_loss = 0
             
             # print('self.exact_bit',self.exact_bit)
-        if not (self.fix_prob or self.mag_prune): 
-            
-            if self.exact_prune_ratio > self.max_prune_ratio: # 2024-7-7 23:48 4.2-> 3.9
-                self.loss = ctc_q_loss  + self.lmb * size_loss + self.lmb_dis * (KL_loss)
-            elif self.exact_prune_ratio < self.min_prune_ratio:
-                self.loss = ctc_q_loss  - self.lmb * size_loss + self.lmb_dis * (KL_loss)
-            elif self.exact_prune_ratio <= self.max_prune_ratio and self.exact_prune_ratio >= self.min_prune_ratio:
-                self.loss = ctc_q_loss + self.lmb_dis * (KL_loss)
-            else:
-                raise NotImplementedError()
+        loss_formula = None
+        if not (self.fix_prob or self.mag_prune):
+            self.loss, loss_formula = minmax_gate_prune_loss(
+                ctc_q_loss,
+                size_loss,
+                self.lmb,
+                float(self.exact_prune_ratio),
+                float(self.min_prune_ratio),
+                float(self.max_prune_ratio),
+            )
         else:
-            self.loss = ctc_q_loss + self.lmb * size_loss + self.lmb_dis * (KL_loss)
-            # else:
-            #     # self.hubert.fix_threshold()
-            #     if self.freeze_thre == 0:
-            #         for name, param in self.named_parameters():
-            #             # print(name)
-            #             if "threshold" in name:
-            #                 param.requires_grad = False
-            #             else:
-            #                 param.requires_grad = True
-            #         self.freeze_thre = 1
-            #     size_loss = 0
-            #     self.loss = ctc_q_loss + self.lmb_dis * (distil_loss)
+            loss_formula = (
+                "fix_prob_or_mag_prune: loss = ctc_q_loss + lmb * size_loss "
+                "(size_loss forced to 0 in this branch)"
+            )
+            self.loss = ctc_q_loss + self.lmb * size_loss
+
+        if labels is not None and loss_list[0] is not None and self.loss is not None:
+            log_i = getattr(self, "_pruned_ctc_loss_log_i", 0) + 1
+            self._pruned_ctc_loss_log_i = log_i
+            if log_i % 100 == 1:
+                log_pruned_ctc_loss_breakdown(
+                    logger,
+                    "PrunedHubertForCTC",
+                    prune_kind="unstr",
+                    ctc_q_loss=ctc_q_loss,
+                    lmb=self.lmb,
+                    size_loss=size_loss,
+                    total_loss=self.loss,
+                    exact_size=float(self.exact_size),
+                    sum_shape=float(self.sum_shape),
+                    exact_prune_ratio=float(self.exact_prune_ratio),
+                    min_prune_ratio=float(self.min_prune_ratio),
+                    max_prune_ratio=float(self.max_prune_ratio),
+                    loss_formula=loss_formula,
+                    phase="train" if self.training else "eval",
+                )
+
         if not self.training:
             self.current_steps += 1
-            if self.current_steps % 500 == 0 and self.current_steps > 0:
-                print('self.exact_prune_ratio:', self.exact_prune_ratio)
-                
+
         return {
                 'loss': self.loss,
                 'loss1': ctc_q_loss,

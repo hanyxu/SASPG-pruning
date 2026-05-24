@@ -11,6 +11,11 @@ env.sh
 # ASR runtime
 ASR/cache/
 ASR/smoke_runs_*/
+ASR/smoke_100h_8exp/
+ASR/**/checkpoint-*/
+ASR/**/runs/
+**/asr_smoke_out/
+**/smoke_8exp/
 ASR/hf_models/*
 !ASR/hf_models/README.md
 !ASR/hf_models/wav2vec2-base-100h/**

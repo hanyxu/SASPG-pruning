@@ -6,8 +6,21 @@ import torch
 import torch.nn as nn
 
 
+def _coerce_prune_index(index: torch.Tensor) -> torch.LongTensor:
+    if index.numel() == 0:
+        return index.long().reshape(0)
+    if index.dim() == 0:
+        index = index.unsqueeze(0)
+    elif index.dim() > 1:
+        index = index.reshape(-1)
+    return index.long().contiguous()
+
+
 def prune_linear_layer(layer: nn.Linear, index: torch.LongTensor, dim: str):
     "Prune linear layer in place."
+    index = _coerce_prune_index(index)
+    if index.numel() == 0:
+        raise ValueError("prune_linear_layer: empty index (no channels/heads kept)")
     # NOTE: weight: (out_features, in_features), bias: (out_features,)
     if dim == "input":
         dim = 1

@@ -2,27 +2,25 @@
 
 Open-source release for **SASPG / magnitude / NASP** pruning on LibriSpeech ASR with Wav2Vec2 and HuBERT CTC models.
 
+## Smoke test (authors)
+
+Reproduce the **four** LibriSpeech-100h SASPG smoke runs from a clean clone:
+
+1. `git lfs pull` (bundled `hf_models/` baselines).
+2. Follow **[`docs/SMOKE.md`](docs/SMOKE.md)** — `validation_smoke_8exp/user_sim` → `02_run_asr_rotate_4.sh`.
+
+Optional: MAG ×4 (`05_run_asr_mag_rotate_4.sh`), NASP str ×2 (`06_run_asr_nasp_str_rotate_2.sh`).
+
 ## Features
 
-- **Methods**: SASPG (unstructured & structured), magnitude pruning, NASP (structured Gumbel ladder)
+- **Methods**: SASPG (unstructured & structured), magnitude pruning (prune-first + finetune), NASP (structured Gumbel ladder)
 - **Backbones**: Wav2Vec2, HuBERT (see `utils/hf_models.py`)
-- **Smoke grid**: 20 slots — method × unstr/str × backbone × sparsity — see [`smoke_experiment_matrix.md`](smoke_experiment_matrix.md)
 - **Data**: CSV manifests in-repo; LibriSpeech **audio** must be obtained separately ([`DATA.md`](DATA.md))
 
-## Quick start
+## Manual training (advanced)
 
 ```bash
-cd SSLprune_ASR_release   # or clone repo root if published flat
-
-# 1) Pretrained weights (not in git — ~3 GB)
-bash scripts/fetch_hf_models.sh
-
-# 2) LibriSpeech audio (license: openslr.org/12)
-ln -sfn /path/to/LibriSpeech data/librispeech/audio
-
-# 3) Optional env
-cp env.example env.sh && source env.sh
-
+cd ASR
 export PYTHONPATH="$(pwd)"
 
 python main_prune.py train-pruned \
@@ -31,33 +29,21 @@ python main_prune.py train-pruned \
   --reg-type saspg_unstr --max-prune-ratio 0.5 --min-prune-ratio 0.48
 ```
 
-Full smoke grid (500 steps per slot):
-
-```bash
-./smoke_20exp_500steps.sh
-```
-
 ## Layout
 
 | Path | Role |
 |------|------|
 | `main_prune.py` | Training / pruning CLI |
-| `prune_ASR_*_mag.py` | Magnitude structural export |
+| `mag_asr_prune_export.py` | MAG prune-first export |
 | `models/`, `pruning/` | Prunable model & pruner modules |
 | `utils/` | HF loading, LibriSpeech dataset, Click options |
 | `data/librispeech/csv_metadata/` | Train/dev/test manifests |
-| `hf_models/` | Local HF checkpoints (via `scripts/fetch_hf_models.sh`) |
-| `scripts/` | Data conversion, GitHub publish helper |
+| `hf_models/` | Bundled HF checkpoints (Git LFS) |
+| `docs/SMOKE.md` | Author smoke guide |
 
-## Publish to GitHub
+## Acknowledgments
 
-Maintainers: set `GITHUB_TOKEN` (repo scope) or run `gh auth login`, then:
-
-```bash
-bash scripts/publish_to_github.sh
-```
-
-Default remote: `https://github.com/hanyxu/SASPG-pruning.git`
+SUPERB-style upstream ideas and teacher formats build on **[DPHuBERT](https://github.com/pyf98/DPHuBERT)**.
 
 ## License
 

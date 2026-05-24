@@ -13,7 +13,7 @@ from pruning.base_pruned_classes import FP32Acts
 # from pruning_manager import PruningManager
 
 # from pruning_manager_direct_8_6_4_split_init import PruningManager
-from pruning_manager_direct import PruningManager
+from pruning.pruning_manager_direct import PruningManager
 
 from pruning.range_estimators import RangeEstimators
 from pruning.utils import to_numpy

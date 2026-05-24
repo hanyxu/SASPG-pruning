@@ -60,3 +60,4 @@ fi
 
 echo "[ASR] slot=${_slot} method=nasp_str backbone=${_backbone} sp=${_sp} type=100 max_steps=${MAX_STEPS} out=${_out}"
 run_asr_smoke_nasp_str_100h "$_out" "$_backbone" "$_sp"
+echo "[ASR NASP smoke OK] ${_slot}"

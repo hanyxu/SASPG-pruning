@@ -63,3 +63,4 @@ fi
 
 echo "[ASR] slot=${_slot} mode=${_mode} backbone=${_backbone} sp=${_sp} type=100 max_steps=${MAX_STEPS} out=${_out}"
 run_asr_smoke_saspg_100h "$_out" "$_mode" "$_backbone" "$_sp"
+echo "[ASR smoke OK] ${_slot}"

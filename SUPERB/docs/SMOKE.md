@@ -1,7 +1,9 @@
 # SUPERB smoke test (LibriSpeech 100h) — author guide
 
-This is the **recommended entry** for reproducing SASPG upstream smoke on a fresh machine.
-You run **four SUPERB jobs** (HuBERT-base/large × structured/unstructured). ASR smoke is optional and uses the same conda env.
+This guide covers **SUPERB upstream** smoke on a fresh machine.
+You run **four SUPERB jobs** (HuBERT-base/large × structured/unstructured).
+
+**Authors:** start with **ASR smoke ×4** — [`ASR/docs/SMOKE.md`](../../ASR/docs/SMOKE.md) (`02_run_asr_rotate_4.sh`). ASR and SUPERB share the same conda env.
 
 Repository: [hanyxu/SASPG-pruning](https://github.com/hanyxu/SASPG-pruning)
 

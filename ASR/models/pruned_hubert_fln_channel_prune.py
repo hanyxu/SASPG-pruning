@@ -6,6 +6,7 @@ import math
 import warnings
 # import torch.nn.functional as F
 import os
+import logging
 from datetime import datetime
 
 import torch
@@ -17,7 +18,7 @@ import sys
 # sys.path.append('/project_bdda7/bdda/hnxu/miniconda3/envs/prune_wav/lib/python3.8/site-packages/transformers')
 # from deepspeed import is_deepspeed_zero3_enabled
 from transformers.modeling_outputs import Wav2Vec2BaseModelOutput
-from transformers.pytorch_utils import torch_int_div
+from utils.transformers_compat import torch_int_div
 
 from transformers.models.wav2vec2.modeling_wav2vec2 import (
     # BertLayer,
@@ -31,7 +32,6 @@ from transformers.models.wav2vec2.modeling_wav2vec2 import (
     Wav2Vec2EncoderLayer,
     Wav2Vec2AdapterLayer,
     Wav2Vec2EncoderLayerStableLayerNorm,
-    Wav2Vec2GumbelVectorPruner, # how to do
     BaseModelOutput, # used: Wav2Vec2Encoder --> wav2vec2model
     # Wav2vec2BaseModelOutput # used: wav2vec2model
     # Wav2vec2BaseModelOutput does not inherit from BaseModelOutput
@@ -54,6 +54,25 @@ from transformers.models.hubert.configuration_hubert import HubertConfig
 #     PACTPruner,
 # )
 from .pruning_utils import prune_linear_layer
+from utils.prune_ratio_utils import (
+    encoder_attn_ff_exact_size_from_backbone,
+    encoder_attn_ff_gate_loss_prune_channel_from_backbone,
+    encoder_attn_ff_prune_ratio,
+    format_encoder_attn_ff_prune_ratio_message,
+    log_pruned_ctc_loss_breakdown,
+    minmax_gate_prune_loss,
+)
+
+logger = logging.getLogger(__name__)
+
+
+def _pruned_ctc_loss_scalar(x):
+    if x is None:
+        return None
+    if isinstance(x, torch.Tensor):
+        return float(x.detach().float().cpu().item())
+    return float(x)
+
 
 _HIDDEN_STATES_START_POSITION = 2
 
@@ -118,7 +137,7 @@ def _compute_mask_indices(
     )
 
     # SpecAugment mask to fill
-    spec_aug_mask = np.zeros((batch_size, sequence_length), dtype=np.bool)
+    spec_aug_mask = np.zeros((batch_size, sequence_length), dtype=np.bool_)
     spec_aug_mask_idxs = []
 
     max_num_masked_span = compute_num_masked_span(sequence_length)
@@ -463,67 +482,34 @@ class PrunedHubertFeedForward(PrunedModel):
         self.value_0_075 = prune_params['value_0_075']
         self.value_0_1 = prune_params['value_0_1']
         self.nasp_ladder = prune_params.get('nasp_ladder', False)
-        self._keep_ratio = 1.0 - float(prune_params.get('max_prune_ratio', 0.5))
-        
-        # print('self.is_load:',self.is_load)
-        if not self.is_load:
-            
-            w_in = self.intermediate_dense.weight
-            w_out = self.output_dense.weight
+        self.mag_structural = prune_params.get('mag_structural', False)
+        self.fix_prob = bool(prune_params.get('fix_prob', False))
+        self.all_prune_ratio = float(prune_params.get('max_prune_ratio', 0.5))
+        _dev = next(self.intermediate_dense.parameters()).device
+        if not self.nasp_ladder and not self.mag_structural:
+            self.threshold_prune_channel = torch.nn.Parameter(
+                torch.tensor(1e-5, device=_dev, dtype=torch.float32)
+            )
+            self.reset_threshold_channel = False
+            self.get_fix_mask_channel = False
+            self.sum_channel_score = None
+        elif self.nasp_ladder and not self.is_load:
+            from utils.channel_prune_str import nasp_init_ladder_masks_ffn
 
-            self.sum_channel_score = (w_in**2).sum(dim=1) + (w_out**2).sum(dim=0)
-           
-            self.mask_1 = torch.ones((4096, 1), device='cuda')
-            
-            _, self.indices_0_75 = torch.topk(self.sum_channel_score, 3072)
-            # self.mask_0_75 = torch.zeros((4096, 1), device='cuda')
-            self.mask_0_75[self.indices_0_75] = 1
-            
-            
-            _, self.indices_0_5 = torch.topk(self.sum_channel_score, 2048)
-            # self.mask_0_5 = torch.zeros((4096, 1), device='cuda')
-            self.mask_0_5[self.indices_0_5] = 1
-            
-            _, self.indices_0_25 = torch.topk(self.sum_channel_score, 1024)
-            # self.mask_0_25 = torch.zeros((4096, 1), device='cuda')
-            self.mask_0_25[self.indices_0_25] = 1
-            
-            _, self.indices_0_125 = torch.topk(self.sum_channel_score, 512)
-            # self.mask_0_125 = torch.zeros((4096, 1), device='cuda')
-            self.mask_0_125[self.indices_0_125] = 1
-            
-            if self.value_0_075 != 0.:
-                _, self.indices_0_1 = torch.topk(self.sum_channel_score, 409)
-                # self.mask_0_1 = torch.zeros((4096, 1), device='cuda')
-                self.mask_0_1[self.indices_0_1] = 1
-                
-                _, self.indices_0_075 = torch.topk(self.sum_channel_score, 307)
-                # self.mask_0_075 = torch.zeros((4096, 1), device='cuda')
-                self.mask_0_075[self.indices_0_075] = 1
-            
+            nasp_init_ladder_masks_ffn(self, _dev)
             self.is_load = True
-        
+        elif self.mag_structural:
+            self.register_buffer('mag_pruned', torch.tensor(0.0, device=_dev))
+            self.sum_channel_score = None
 
         self.channel_prune10 = False
 
         self.is_hard = False # only size loss is hard
         
         if self.nasp_ladder:
-            from utils.channel_prune_str import nasp_require_seven_tier_values
-            nasp_require_seven_tier_values(self.value_0_075, self.value_0_1)
-            if self.value_0_75 == 0.:
-                raise NotImplementedError("NASP ladder requires non-zero --value-075")
-            denom = (
-                self.value_1 + self.value_0_5 + self.value_0_25 + self.value_0_125
-                + self.value_0_75 + self.value_0_1 + self.value_0_075
-            )
-            self.prob_0_75 = torch.nn.Parameter(torch.tensor([self.value_0_75 / denom]), requires_grad=True)
-            self.prob_0_5 = torch.nn.Parameter(torch.tensor([self.value_0_5 / denom]), requires_grad=True)
-            self.prob_0_25 = torch.nn.Parameter(torch.tensor([self.value_0_25 / denom]), requires_grad=True)
-            self.prob_0_125 = torch.nn.Parameter(torch.tensor([self.value_0_125 / denom]), requires_grad=True)
-            self.prob_1 = torch.nn.Parameter(torch.tensor([self.value_1 / denom]), requires_grad=True)
-            self.prob_0_1 = torch.nn.Parameter(torch.tensor([self.value_0_1 / denom]), requires_grad=True)
-            self.prob_0_075 = torch.nn.Parameter(torch.tensor([self.value_0_075 / denom]), requires_grad=True)
+            from utils.channel_prune_str import nasp_init_prob_parameters
+
+            nasp_init_prob_parameters(self)
         
         self.current_steps = 0
         self.total_steps = 0 
@@ -583,49 +569,23 @@ class PrunedHubertFeedForward(PrunedModel):
         hidden_states = self.intermediate_act_fn(hidden_states)
         hidden_states = self.intermediate_dropout(hidden_states)
 
-        if not self.nasp_ladder:
-            from utils.channel_prune_str import saspg_pick_channel_mask, set_ffn_pruner_exact_size
-            self.mask_channel = saspg_pick_channel_mask(self, self._keep_ratio)
-            set_ffn_pruner_exact_size(self, self.mask_channel)
-            hidden_states = hidden_states * self.mask_channel.squeeze(-1)
-            hidden_states = self.output_dense(hidden_states)
-            hidden_states = self.output_dropout(hidden_states)
-            return hidden_states
+        if self.mag_structural:
+            from utils.channel_prune_str import mag_apply_ffn_channel_mask
 
-        self.exp_prob = torch.cat(
-            [self.prob_1, self.prob_0_5, self.prob_0_25, self.prob_0_125, self.prob_0_75, self.prob_0_1, self.prob_0_075]
-        )
-        self.gumble_prob = torch.nn.functional.gumbel_softmax(self.exp_prob, tau=self.tau, hard=self.is_hard)
-        if self.training:
-            self.mask_channel = (
-                self.gumble_prob[0] * self.mask_1
-                + self.gumble_prob[1] * self.mask_0_5
-                + self.gumble_prob[2] * self.mask_0_25
-                + self.gumble_prob[3] * self.mask_0_125
-                + self.gumble_prob[4] * self.mask_0_75
-                + self.gumble_prob[5] * self.mask_0_1
-                + self.gumble_prob[6] * self.mask_0_075
-            )
+            mag_apply_ffn_channel_mask(self)
+        elif not self.nasp_ladder:
+            from utils.channel_prune_str import saspg_apply_ffn_channel_mask
+
+            saspg_apply_ffn_channel_mask(self)
         else:
-            self.argmax_index = int(torch.argmax(self.exp_prob))
-            ladder_masks = (
-                self.mask_1,
-                self.mask_0_5,
-                self.mask_0_25,
-                self.mask_0_125,
-                self.mask_0_75,
-                self.mask_0_1,
-                self.mask_0_075,
-            )
-            self.mask_channel = ladder_masks[self.argmax_index]
+            from utils.channel_prune_str import nasp_forward_channel_mask
+
+            nasp_forward_channel_mask(self)
+            self.intermediate_dense.weight_pruneizer_saspg.pruner.pruner.exp_prob = self.exp_prob
+            self.output_dense.weight_pruneizer_saspg.pruner.pruner.exp_prob = self.exp_prob
+            self.intermediate_dense.weight_pruneizer_saspg.pruner.pruner.gumble_prob = self.gumble_prob
+            self.output_dense.weight_pruneizer_saspg.pruner.pruner.gumble_prob = self.gumble_prob
         hidden_states = hidden_states * self.mask_channel.squeeze(-1)
-        
-        self.intermediate_dense.weight_pruneizer_saspg.pruner.pruner.exp_prob = self.exp_prob 
-        self.output_dense.weight_pruneizer_saspg.pruner.pruner.exp_prob = self.exp_prob 
-        
-        self.intermediate_dense.weight_pruneizer_saspg.pruner.pruner.gumble_prob = self.gumble_prob 
-        self.output_dense.weight_pruneizer_saspg.pruner.pruner.gumble_prob = self.gumble_prob 
-        
         hidden_states = self.output_dense(hidden_states)
         # self.intermediate_dense.weight_pruneizer.pruner.pruner.use_distil = True
         hidden_states = self.output_dropout(hidden_states)
@@ -638,16 +598,22 @@ class PrunedHubertFeedForward(PrunedModel):
             "ff_interm_features": self.intermediate_dense.out_features,
         }
         if self.sum_channel_score is not None:
-            self.sum_channel_score = (self.intermediate_dense.weight**2).sum(dim=1) + (self.output_dense.weight**2).sum(dim=0)
-            self.normalize(self.sum_channel_score)
-            interm_mask = (self.mask_channel == 1.0)
-            interm_index = interm_mask.nonzero().squeeze(-1)
-            new_config["ff_interm_features"] = len(interm_index)
+            from utils.channel_prune_str import (
+                count_kept_channels,
+                ensure_export_mask_channel,
+                flatten_channel_mask,
+                kept_channel_indices,
+            )
+
+            ensure_export_mask_channel(self)
+            interm_mask_1d = flatten_channel_mask(self.mask_channel)
+            interm_index = kept_channel_indices(self.mask_channel)
+            new_config["ff_interm_features"] = count_kept_channels(self.mask_channel)
             if new_config["ff_interm_features"] == 0:
                 new_config["use_feed_forward"] = False
             else:
                 prune_linear_layer(self.intermediate_dense, interm_index, "output")
-                self.output_dense.weight.data *= interm_mask
+                self.output_dense.weight.data *= interm_mask_1d
                 prune_linear_layer(self.output_dense, interm_index, "input")
             self.gate_for_intermediate = None
         return new_config
@@ -707,57 +673,33 @@ class PrunedHubertAttention(PrunedModel):
         self.value_0_075 = prune_params['value_0_075']
         self.value_0_1 = prune_params['value_0_1']
         self.nasp_ladder = prune_params.get('nasp_ladder', False)
-        self._keep_ratio = 1.0 - float(prune_params.get('max_prune_ratio', 0.5))
-        
-        if not self.is_load:
-            
-            w_q = self.q_proj.weight
-            w_k = self.k_proj.weight
-            w_v = self.v_proj.weight
-            w_out = self.out_proj.weight
+        self.mag_structural = prune_params.get('mag_structural', False)
+        self.fix_prob = bool(prune_params.get('fix_prob', False))
+        self.all_prune_ratio = float(prune_params.get('max_prune_ratio', 0.5))
+        _dev = next(self.q_proj.parameters()).device
+        if not self.nasp_ladder and not self.mag_structural:
+            self.threshold_prune_channel = torch.nn.Parameter(
+                torch.tensor(1e-5, device=_dev, dtype=torch.float32)
+            )
+            self.reset_threshold_channel = False
+            self.get_fix_mask_channel = False
+            self.sum_channel_score = None
+        elif self.nasp_ladder and not self.is_load:
+            from utils.channel_prune_str import nasp_init_ladder_masks_attn
 
-            self.sum_channel_score = (w_q**2).sum(dim=1) + (w_k**2).sum(dim=1) + (w_v**2).sum(dim=1) + (w_out**2).sum(dim=0)
-            self.sum_channel_score = self.sum_channel_score.reshape(self.num_heads, -1, 1).sum(dim=1)
-                        
-            self.mask_1 = torch.ones((16, 1), device='cuda')
-            # import pdb;pdb.set_trace()
-            _, self.indices_0_75 = torch.topk(self.sum_channel_score.squeeze(-1), 12)
-            # self.mask_0_75 = torch.zeros((16, 1), device='cuda')
-            self.mask_0_75[self.indices_0_75] = 1
-            
-            _, self.indices_0_5 = torch.topk(self.sum_channel_score.squeeze(-1), 8)
-            # self.mask_0_5 = torch.zeros((16, 1), device='cuda')
-            self.mask_0_5[self.indices_0_5] = 1
-            
-            _, self.indices_0_25 = torch.topk(self.sum_channel_score.squeeze(-1), 4)
-            # self.mask_0_25 = torch.zeros((16, 1), device='cuda')
-            self.mask_0_25[self.indices_0_25] = 1
-            
-            _, self.indices_0_125 = torch.topk(self.sum_channel_score.squeeze(-1), 2)
-            # self.mask_0_125 = torch.zeros((16, 1), device='cuda')
-            self.mask_0_125[self.indices_0_125] = 1
-            
-            if self.value_0_075 != 0.:
-                _, self.indices_0_075 = torch.topk(self.sum_channel_score.squeeze(-1), 1)
-                # self.mask_0_075 = torch.zeros((16, 1), device='cuda')
-                self.mask_0_075[self.indices_0_075] = 1
-            
-            
+            nasp_init_ladder_masks_attn(self, _dev)
             self.is_load = True
-        
+        elif self.mag_structural:
+            self.register_buffer('mag_pruned', torch.tensor(0.0, device=_dev))
+            self.sum_channel_score = None
 
         self.channel_prune10 = False
 
         self.is_hard = False # only size loss is hard
         if self.nasp_ladder:
-            if self.value_0_75 == 0.:
-                raise NotImplementedError("NASP attention ladder requires non-zero --value-075")
-            denom = self.value_1 + self.value_0_5 + self.value_0_25 + self.value_0_125 + self.value_0_75
-            self.prob_0_75 = torch.nn.Parameter(torch.tensor([self.value_0_75 / denom]), requires_grad=True)
-            self.prob_0_5 = torch.nn.Parameter(torch.tensor([self.value_0_5 / denom]), requires_grad=True)
-            self.prob_0_25 = torch.nn.Parameter(torch.tensor([self.value_0_25 / denom]), requires_grad=True)
-            self.prob_0_125 = torch.nn.Parameter(torch.tensor([self.value_0_125 / denom]), requires_grad=True)
-            self.prob_1 = torch.nn.Parameter(torch.tensor([self.value_1 / denom]), requires_grad=True)
+            from utils.channel_prune_str import nasp_init_prob_parameters
+
+            nasp_init_prob_parameters(self)
 
         self.k_proj.weight_pruneizer_saspg.pruner.pruner.value_0_75 = self.value_0_75 
         self.q_proj.weight_pruneizer_saspg.pruner.pruner.value_0_75 = self.value_0_75 
@@ -769,10 +711,6 @@ class PrunedHubertAttention(PrunedModel):
         self.v_proj.weight_pruneizer_saspg.pruner.pruner.value_0_075 = self.value_0_075 
         self.out_proj.weight_pruneizer_saspg.pruner.pruner.value_0_075 = self.value_0_075
         
-        tensor = torch.tensor(1e-5).to("cuda" if self.cuda else "cpu")
-        
-        setattr(self, f'threshold_prune', torch.nn.Parameter(tensor))
-
         self.current_steps = 0
         self.total_steps = 0 
         self.warmup_ratio = 0.1
@@ -951,47 +889,27 @@ class PrunedHubertAttention(PrunedModel):
 
         attn_output = attn_output.view(bsz, self.num_heads, tgt_len, self.head_dim)
         
-        if not self.nasp_ladder:
-            from utils.channel_prune_str import saspg_pick_channel_mask, set_attn_pruner_exact_size
-            self.mask_channel = saspg_pick_channel_mask(self, self._keep_ratio)
-            set_attn_pruner_exact_size(self, self.mask_channel)
-            attn_output = attn_output * self.mask_channel.unsqueeze(-1)
-            attn_output = attn_output.transpose(1, 2)
-            attn_output = attn_output.reshape(bsz, tgt_len, self.embed_dim)
-            attn_output = self.out_proj(attn_output)
-            return attn_output, attn_weights_reshaped, past_key_value
+        if self.mag_structural:
+            from utils.channel_prune_str import mag_apply_attn_channel_mask
 
-        self.exp_prob = torch.cat([self.prob_1, self.prob_0_5, self.prob_0_25, self.prob_0_125, self.prob_0_75])
-        self.gumble_prob = torch.nn.functional.gumbel_softmax(self.exp_prob, tau=self.tau, hard=self.is_hard)
-        if self.training:
-            self.mask_channel = (
-                self.gumble_prob[0] * self.mask_1
-                + self.gumble_prob[1] * self.mask_0_5
-                + self.gumble_prob[2] * self.mask_0_25
-                + self.gumble_prob[3] * self.mask_0_125
-                + self.gumble_prob[4] * self.mask_0_75
-            )
+            mag_apply_attn_channel_mask(self)
+        elif not self.nasp_ladder:
+            from utils.channel_prune_str import saspg_apply_attn_channel_mask
+
+            saspg_apply_attn_channel_mask(self)
         else:
-            self.argmax_index = int(torch.argmax(self.exp_prob))
-            ladder_masks = (self.mask_1, self.mask_0_5, self.mask_0_25, self.mask_0_125, self.mask_0_75)
-            self.mask_channel = ladder_masks[self.argmax_index]
-        attn_output = attn_output * self.mask_channel.unsqueeze(-1)
-        
-        self.k_proj.weight_pruneizer_saspg.pruner.pruner.exp_prob = self.exp_prob 
-        self.q_proj.weight_pruneizer_saspg.pruner.pruner.exp_prob = self.exp_prob 
-        self.v_proj.weight_pruneizer_saspg.pruner.pruner.exp_prob = self.exp_prob 
-        self.out_proj.weight_pruneizer_saspg.pruner.pruner.exp_prob = self.exp_prob
-        
-        self.k_proj.weight_pruneizer_saspg.pruner.pruner.gumble_prob = self.gumble_prob
-        self.q_proj.weight_pruneizer_saspg.pruner.pruner.gumble_prob = self.gumble_prob 
-        self.v_proj.weight_pruneizer_saspg.pruner.pruner.gumble_prob = self.gumble_prob 
-        self.out_proj.weight_pruneizer_saspg.pruner.pruner.gumble_prob = self.gumble_prob
-        
+            from utils.channel_prune_str import nasp_forward_channel_mask
+
+            nasp_forward_channel_mask(self)
+            for _layer in (self.k_proj, self.q_proj, self.v_proj, self.out_proj):
+                _layer.weight_pruneizer_saspg.pruner.pruner.exp_prob = self.exp_prob
+                _layer.weight_pruneizer_saspg.pruner.pruner.gumble_prob = self.gumble_prob
+        head_mask = self.mask_channel.reshape(self.num_heads)
+        attn_output = attn_output * head_mask.view(self.num_heads, 1, 1)
         attn_output = attn_output.transpose(1, 2)
 
-        # Use the `embed_dim` from the config (stored in the class) rather than `hidden_state` because `attn_output` can be
-        # partitioned aross GPUs when using tensor-parallelism.
-        attn_output = attn_output.reshape(bsz, tgt_len, self.embed_dim)
+        # Match TASLP str_modeling_hubert_minmax: flatten heads*head_dim, not config embed_dim.
+        attn_output = attn_output.reshape(bsz, tgt_len, self.num_heads * self.head_dim)
         # print('get out proj')
         
         attn_output = self.out_proj(attn_output)
@@ -1010,21 +928,27 @@ class PrunedHubertAttention(PrunedModel):
         w_v = self.v_proj.weight
         w_out = self.out_proj.weight
         if self.sum_channel_score is not None:
-            self.sum_channel_score = (w_q**2).sum(dim=1) + (w_k**2).sum(dim=1) + (w_v**2).sum(dim=1) + (w_out**2).sum(dim=0)
-            self.sum_channel_score = self.sum_channel_score.reshape(self.num_heads, -1, 1).sum(dim=1)
-            self.normalize(self.sum_channel_score)
-            head_mask = (torch.round(self.mask_channel) == 1.0)
-            new_config["num_heads"] = len(head_mask.nonzero())
+            from utils.channel_prune_str import (
+                count_kept_channels,
+                ensure_export_mask_channel,
+                flatten_channel_mask,
+                kept_channel_indices,
+            )
+
+            ensure_export_mask_channel(self)
+            head_mask_1d = flatten_channel_mask(self.mask_channel)
+            new_config["num_heads"] = count_kept_channels(self.mask_channel)
             if new_config["num_heads"] == 0:
                 new_config["use_attention"] = False
             else:
-                full_mask = head_mask.repeat_interleave(self.head_dim)
-                full_index = full_mask.nonzero().squeeze(-1)
+                full_mask = head_mask_1d.repeat_interleave(self.head_dim)
+                full_index = kept_channel_indices(full_mask)
                 prune_linear_layer(self.k_proj, full_index, "output")
                 prune_linear_layer(self.v_proj, full_index, "output")
                 prune_linear_layer(self.q_proj, full_index, "output")
                 self.out_proj.weight.data *= full_mask
                 prune_linear_layer(self.out_proj, full_index, "input")
+                self.num_heads = new_config["num_heads"]
             self.gate_for_heads = None
         return new_config
 
@@ -1695,7 +1619,9 @@ class PrunedHubertForCTC(PrunedHubertPreTrainedModel):
         
         # import pdb;pdb.set_trace()
         # import pdb;pdb.set_trace()
-        
+        from utils.transformers_compat import force_eager_attn_config
+
+        force_eager_attn_config(org_model.config)
         super().__init__(org_model.config)
         
         # self.layer_id = getattr(org_model, 'layer_id', None)
@@ -1718,25 +1644,24 @@ class PrunedHubertForCTC(PrunedHubertPreTrainedModel):
         self.depth = 24
                 
         self.lmb = prune_params['lmb']
-        self.lmb_dis = prune_params['lmb_dis']
+        self.lmb_dis = float(prune_params.pop('lmb_dis', 0.0))
         self.idx = 0
         self.single_bit = int(prune_params['single_bit'])
         prune_params.pop('single_bit')
         
         self.fix_prob = prune_params['fix_prob']
-        prune_params.pop('fix_prob')
         self.mag_prune = prune_params['mag_prune']
-        prune_params.pop('mag_prune')
         prune_params.pop('hand_ratio')
         
         prune_params.pop('hard')
         prune_params.pop('only_size_hard')
         prune_params.pop('decay_tau')
+        prune_params.pop('nasp_ladder', None)
+        prune_params.pop('mag_structural', None)
         
         prune_params.pop('weight_prune')
         prune_params.pop('act_prune')
         prune_params.pop('lmb')
-        prune_params.pop('lmb_dis')
 
         prune_params.pop('is_arc_prune')
         prune_params.pop('prune_2_4')
@@ -1748,8 +1673,6 @@ class PrunedHubertForCTC(PrunedHubertPreTrainedModel):
         
         self.max_prune_ratio = prune_params['max_prune_ratio']
         self.min_prune_ratio = prune_params['min_prune_ratio']
-        prune_params.pop('max_prune_ratio')
-        prune_params.pop('min_prune_ratio')
         
         prune_params['is_load'] = False
         
@@ -1794,6 +1717,10 @@ class PrunedHubertForCTC(PrunedHubertPreTrainedModel):
         prune_params.pop('save_path')
         
         self.hubert = PrunedHubertModel(org_model.hubert, **prune_params)
+        prune_params.pop('max_prune_ratio', None)
+        prune_params.pop('min_prune_ratio', None)
+        prune_params.pop('fix_prob', None)
+        prune_params.pop('mag_prune', None)
         # import pdb; pdb.set_trace()
         # self.dropout = nn.Dropout(config.final_dropout)
         if hasattr(org_model, 'dropout'):
@@ -2102,7 +2029,6 @@ class PrunedHubertForCTC(PrunedHubertPreTrainedModel):
         ctc_fp_loss = 0.
         ctc_q_loss = 0.
         size_loss = 0.
-        KL_loss = 0.
         cos_loss = 0.
 
         KL_fp_8 = 0.
@@ -2122,7 +2048,8 @@ class PrunedHubertForCTC(PrunedHubertPreTrainedModel):
         # assert not logits_list[1].equal(logits_list[0])
         # self.get_gate_loss
         # import pdb;pdb.set_trace()
-        size_loss = self.hubert.get_gate_loss_prune_channel()
+        self.exact_size = encoder_attn_ff_exact_size_from_backbone(self.hubert)
+        size_loss = encoder_attn_ff_gate_loss_prune_channel_from_backbone(self.hubert)
         
         # if self.first_round:
         #     self.hubert.get_gate_loss_direct()
@@ -2145,8 +2072,9 @@ class PrunedHubertForCTC(PrunedHubertPreTrainedModel):
         elif self.reg_type == 'disweightout':
             distil_loss = self.hubert.get_gate_loss_disweightout()
         
-        self.exact_size = self.hubert.get_exact_size_prune()
-        self.exact_prune_ratio = float(self.exact_size)/self.sum_shape
+        self.exact_prune_ratio = encoder_attn_ff_prune_ratio(
+            self.exact_size, self.sum_shape
+        )
         # print('self.exact_bit',self.exact_bit)
         # threshold_all = self.hubert.get_threshold_all()
         
@@ -2204,12 +2132,6 @@ class PrunedHubertForCTC(PrunedHubertPreTrainedModel):
         if not os.path.exists(file_name):
             np.save(file_name, remove_ln_list)
             
-                
-        if not isinstance(KL_loss, float):
-            KL_loss = KL_loss.to('cuda')
-        else:
-            KL_loss = torch.tensor(0.).to('cuda')
-            
         if (self.fix_prob or self.mag_prune):
             if self.freeze_thre == 0:
                 for name, param in self.named_parameters():
@@ -2229,39 +2151,81 @@ class PrunedHubertForCTC(PrunedHubertPreTrainedModel):
             # ctc_2_loss = 0
             
             # print('self.exact_bit',self.exact_bit)
-        if not (self.fix_prob or self.mag_prune): 
-            
-            if self.exact_prune_ratio > self.max_prune_ratio: # 2024-7-7 23:48 4.2-> 3.9
-                self.loss = ctc_q_loss  + self.lmb * size_loss + self.lmb_dis * (KL_loss)
-            elif self.exact_prune_ratio < self.min_prune_ratio:
-                self.loss = ctc_q_loss  - self.lmb * size_loss + self.lmb_dis * (KL_loss)
-            elif self.exact_prune_ratio <= self.max_prune_ratio and self.exact_prune_ratio >= self.min_prune_ratio:
-                self.loss = ctc_q_loss + self.lmb_dis * (KL_loss)
-            else:
-                raise NotImplementedError()
+        loss_formula = None
+        if not (self.fix_prob or self.mag_prune):
+            self.loss, loss_formula = minmax_gate_prune_loss(
+                ctc_q_loss,
+                size_loss,
+                self.lmb,
+                float(self.exact_prune_ratio),
+                float(self.min_prune_ratio),
+                float(self.max_prune_ratio),
+            )
         else:
-            self.loss = ctc_q_loss + self.lmb * size_loss + self.lmb_dis * (KL_loss)
-            # else:
-            #     # self.hubert.fix_threshold()
-            #     if self.freeze_thre == 0:
-            #         for name, param in self.named_parameters():
-            #             # print(name)
-            #             if "threshold" in name:
-            #                 param.requires_grad = False
-            #             else:
-            #                 param.requires_grad = True
-            #         self.freeze_thre = 1
-            #     size_loss = 0
-            #     self.loss = ctc_q_loss + self.lmb_dis * (distil_loss)
-        
+            loss_formula = (
+                "fix_prob_or_mag_prune: loss = ctc_q_loss + lmb * size_loss "
+                "(size_loss forced to 0 in this branch)"
+            )
+            self.loss = ctc_q_loss + self.lmb * size_loss
+
+        if labels is not None and loss_list[0] is not None and self.loss is not None:
+            log_i = getattr(self, "_pruned_ctc_loss_log_i", 0) + 1
+            self._pruned_ctc_loss_log_i = log_i
+            if log_i % 100 == 1:
+                _pk = "mag_str_channel" if getattr(self, "mag_structural", False) else "str_channel"
+                log_pruned_ctc_loss_breakdown(
+                    logger,
+                    "PrunedHubertForCTC",
+                    prune_kind=_pk,
+                    ctc_q_loss=ctc_q_loss,
+                    lmb=self.lmb,
+                    size_loss=size_loss,
+                    total_loss=self.loss,
+                    exact_size=float(self.exact_size),
+                    sum_shape=float(self.sum_shape),
+                    exact_prune_ratio=float(self.exact_prune_ratio),
+                    min_prune_ratio=float(self.min_prune_ratio),
+                    max_prune_ratio=float(self.max_prune_ratio),
+                    loss_formula=loss_formula,
+                    phase="train" if self.training else "eval",
+                )
+
+        # else:
+        #     # self.hubert.fix_threshold()
+        #     if self.freeze_thre == 0:
+        #         for name, param in self.named_parameters():
+        #             # print(name)
+        #             if "threshold" in name:
+        #                 param.requires_grad = False
+        #             else:
+        #                 param.requires_grad = True
+        #         self.freeze_thre = 1
+        #     size_loss = 0
+        #     self.loss = ctc_q_loss + self.lmb_dis * (distil_loss)
+
         if not self.training:
             self.current_steps += 1
             if self.current_steps % 500 == 0 and self.current_steps > 0:
-                print('self.exact_prune_ratio:', self.exact_prune_ratio)
+                _, _pr_msg = format_encoder_attn_ff_prune_ratio_message(
+                    "PrunedHubertForCTC",
+                    float(self.exact_size),
+                    float(self.sum_shape),
+                )
+                print(_pr_msg)
+
+        _dev = next(self.parameters()).device
+        if isinstance(self.loss, torch.Tensor):
+            _dt = self.loss.dtype
+        elif isinstance(ctc_q_loss, torch.Tensor):
+            _dt = ctc_q_loss.dtype
+        else:
+            _dt = torch.float32
+        _z = lambda v: torch.tensor(float(v), device=_dev, dtype=_dt)
+
         return {
                 'loss': self.loss,
                 'loss1': ctc_q_loss,
-                'loss2': self.lmb_dis * KL_loss,
+                'loss2': _z(0.0),
                 'loss3': self.lmb * size_loss,
                 'loss4':ctc_8_loss,
                 'loss5':ctc_4_loss,
@@ -2271,10 +2235,10 @@ class PrunedHubertForCTC(PrunedHubertPreTrainedModel):
                 'kl_div': 0.,
                 'kl_div_1':0.,
                 'kl_div_2':0.,
-                'kl_div_3':self.lmb_dis * KL_fp_8,
-                'kl_div_4':self.lmb_dis * KL_fp_4,
-                'kl_div_5':self.lmb_dis * KL_fp_2,
-                'kl_div_6':self.lmb_dis * KL_fp_mix,
+                'kl_div_3': _z(KL_fp_8),
+                'kl_div_4': _z(KL_fp_4),
+                'kl_div_5': _z(KL_fp_2),
+                'kl_div_6': _z(KL_fp_mix),
                 'logits': logits_list[0], # 5ctc first modified
                 'hidden_states': None,
                 'attentions': None

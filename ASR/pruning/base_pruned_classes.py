@@ -9,7 +9,7 @@ from torch import nn
 # from pruning_manager_direct import PruningManager
 # from pruning.pruners_direct import PMethods
 # from pruning_manager_direct_8_6_4_split_init import PruningManager
-from pruning_manager_direct import PruningManager
+from pruning.pruning_manager_direct import PruningManager
 from pruning.pruners_direct import PMethods
 # from pruning.pruners_switch import PMethods_switch
 
@@ -168,7 +168,11 @@ class PrunedModule(nn.Module): # replace the function of Hijacker which does not
             'prune_dict': {'only_t': 1}}
         
 
-            
+        # SASPG/NASP/MAG str flags live on prune_params for channel models; every Linear
+        # still receives **prune_params via autoprune_utils. They must not reach nn.Linear.
+        kwargs.pop("mag_structural", None)
+        kwargs.pop("nasp_ladder", None)
+
         super().__init__(*args, **kwargs)
         
             
