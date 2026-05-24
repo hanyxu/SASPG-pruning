@@ -1,0 +1,12 @@
+# Pinned wheels for test_saspg / test_saspg_cu118 (ASR + SUPERB smoke).
+# Installed by 00_create_conda_env*.sh and lib/smoke_pip_install.sh (PIP_ONLY_BINARY=:all:).
+transformers==4.45.2
+datasets==2.21.0
+evaluate
+accelerate==0.34.2
+jiwer==2.6.0
+soundfile==0.12.1
+librosa==0.10.2
+click
+pytorch-lightning==2.1.4
+huggingface_hub

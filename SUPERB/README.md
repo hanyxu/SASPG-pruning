@@ -1,5 +1,8 @@
 # SASPG SUPERB Release (48 upstream experiments)
 
+> **Authors — run LibriSpeech-100h smoke first:** English guide [`docs/SMOKE.md`](docs/SMOKE.md)  
+> （conda `test_saspg` 与 ASR 共用 → `01_prepare` → `validation_smoke_8exp/user_sim/03_run_superb_rotate_4.sh`）
+
 本 release 将 DPHuBERT / SASPG 上游训练整理为 **48 条可复现实验**（`configs/experiments.csv` 中 `status=ready`）：
 
 - 4 模型：`hubert_base`, `hubert_large`, `wav2vec2_base`, `wavlm_base`

@@ -1,15 +1,9 @@
 # LibriSpeech audio (not in git)
 
-Place or symlink the unpacked [LibriSpeech](https://www.openslr.org/12.html) tree here so paths match the CSV manifests, e.g.:
+Symlink your local LibriSpeech tree here:
 
-```text
-audio/
-  dev-clean/
-  dev-other/
-  test-clean/
-  test-other/
-  train-clean-100/
-  ...
+```bash
+ln -sfn /path/to/LibriSpeech ASR/data/librispeech/audio
 ```
 
-See [`DATA.md`](../../../DATA.md) at the repo root.
+CSV metadata: `ASR/data/librispeech/csv_metadata/`.

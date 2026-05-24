@@ -278,12 +278,15 @@ class DistillModule(pl.LightningModule):
                 + self.lambda2 * (cur_expected_sparsity - cur_target_sparsity)**2
         else:
             loss_reg = 0
-        # 
-        if self.print_param:
-            print('self.student_model.get_num_params():',self.student_model.get_num_params())
-            self.print_param = False
-            
+
         loss = loss_distill + loss_reg
+
+        if self.print_param:
+            _nparams = self.student_model.get_num_params()
+            if isinstance(_nparams, torch.Tensor):
+                _nparams = float(_nparams.detach().cpu().item())
+            print(f"self.student_model.get_num_params(): {_nparams}")
+            self.print_param = False
 
         self.log_dict(
             {

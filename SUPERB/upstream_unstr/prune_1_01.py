@@ -6,6 +6,7 @@ from argparse import ArgumentParser
 from wav2vec2.model_1_01_final_dis import (
     wav2vec2_model,
 )
+from wav2vec2.prune_param_report import print_saspg_param_report
 # 2025.5.23 11:23 modified
 
 # def set_norm_type(model, norm_type='minmax'):
@@ -146,6 +147,16 @@ def prune_from_ckpt(distilled_ckpt, original_ckpt):
         }
     )
     print(json.dumps(pruned_config, indent=4))
+
+    teacher_baseline = wav2vec2_model(
+        **torch.load(original_ckpt, map_location="cpu")["config"]
+    )
+    print_saspg_param_report(
+        stage="after prune (unstr masks compiled)",
+        teacher_model=teacher_baseline,
+        student_model=model,
+        pruned_config=pruned_config,
+    )
 
     ret = {
         "state_dict": model.state_dict(),

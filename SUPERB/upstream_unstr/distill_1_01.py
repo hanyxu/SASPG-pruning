@@ -21,6 +21,7 @@ from wav2vec2.model_1_01 import (
     wav2vec2_model,
 )
 from wav2vec2.gate_1_01 import Gate
+from wav2vec2.prune_param_report import print_lightning_style_summary
 
 _LG = logging.getLogger(f"{__name__}:{_get_rank()}")
 
@@ -271,6 +272,17 @@ def run_train(args):
         train_subset=args.train_subset,
         seconds_per_batch=args.seconds_per_batch,
         num_workers=args.num_workers,
+    )
+
+    print_lightning_style_summary(
+        teacher_model=teacher_model,
+        student_model=student_model,
+        distill_linear_projs=distill_linear_projs,
+        distill_loss=distill_loss_criterion,
+        stage=(
+            f"distill+SASPG gates (target_sparsity={args.target_sparsity}, "
+            f"sparsity_warmup={args.sparsity_warmup_updates})"
+        ),
     )
 
     trainer.fit(

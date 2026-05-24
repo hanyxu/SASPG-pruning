@@ -1,0 +1,12 @@
+{
+  "bos_token": "<s>",
+  "do_lower_case": false,
+  "eos_token": "</s>",
+  "name_or_path": "facebook/hubert-large-ls960-ft",
+  "pad_token": "<pad>",
+  "replace_word_delimiter_char": " ",
+  "special_tokens_map_file": "/users/bdda/hnxu/.cache/huggingface/transformers/e905ddc20478dfb25fd1f9e8fe2783b83b30570baff6db8f7532d9fb6b93e66d.9d6cd81ef646692fb1c169a880161ea1cb95f49694f220aced9b704b457e51dd",
+  "tokenizer_class": "Wav2Vec2CTCTokenizer",
+  "unk_token": "<unk>",
+  "word_delimiter_token": "|"
+}

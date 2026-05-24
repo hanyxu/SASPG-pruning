@@ -13,6 +13,9 @@ ASR/cache/
 ASR/smoke_runs_*/
 ASR/hf_models/*
 !ASR/hf_models/README.md
+!ASR/hf_models/wav2vec2-base-100h/**
+!ASR/hf_models/hubert-large-librispeech-100h/**
+!ASR/hf_models/hubert-large-ll60k/**
 ASR/data/librispeech/audio/*
 !ASR/data/librispeech/audio/README.md
 
@@ -20,3 +23,20 @@ ASR/data/librispeech/audio/*
 SUPERB/DPHuBERT/
 SUPERB/DPHuBERT_pretrain/
 SUPERB/DPHuBERT_pretrain_unstr/
+
+# SUPERB smoke outputs (do not commit training artifacts)
+SUPERB/upstream_*/.smoke_*
+SUPERB/upstream_*/exp_minmax*/
+SUPERB/upstream_*/exp_minmax_*/
+SUPERB/upstream_*/data/librispeech
+SUPERB/smoke_100h_8exp/logs/
+
+# Bundled teachers (LFS) — keep tracked
+!SUPERB/pretrained/
+SUPERB/pretrained/*
+!SUPERB/pretrained/README.md
+!SUPERB/pretrained/*.hf.pth
+
+# 8-exp user simulation (local paths, generated work)
+validation_smoke_8exp/user_sim/paths.env
+validation_smoke_8exp/user_sim/work/

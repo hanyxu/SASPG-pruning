@@ -73,7 +73,26 @@ class Gate(nn.Module):
 
     def get_weight(self, weight):
         self.weight = weight
+        # Weight tensor may move device after .cuda(); invalidate cached mask only.
+        self.compiled_mask = None
         
+    def _hard_mask_from_weight(self) -> torch.Tensor:
+        """Eval-style binary mask; no training side effects (no step++)."""
+        target_device = (
+            self.weight.device if self.weight is not None else self.gate_threshold.device
+        )
+        if self.gate_threshold.device != target_device:
+            self.gate_threshold.data = self.gate_threshold.data.to(target_device)
+        if self.weight is None:
+            return torch.ones(self.n_in, device=target_device)
+        assert not self.reverse_tau
+        return (
+            torch.round(
+                torch.sigmoid((self.weight ** 2 - self.gate_threshold ** 2) / self.eta_max)
+            )
+            == 1.0
+        )
+
     def reset_parameters(self):
         """Reset the parameters of this module."""
         self.compiled_mask = None
@@ -87,8 +106,14 @@ class Gate(nn.Module):
         torch.Tensor
             The expected L0 norm.
         """
-        assert torch.all(torch.logical_or(self.mask == 0, self.mask == 1)), f"contain non-0 or 1 elements: {torch.unique(self.mask)}"
-        return self.mask.sum()
+        mask = getattr(self, "mask", None)
+        if mask is None:
+            # get_num_params() may call get_weight() then num() without forward().
+            mask = self._hard_mask_from_weight()
+        assert torch.all(torch.logical_or(mask == 0, mask == 1)), (
+            f"contain non-0 or 1 elements: {torch.unique(mask)}"
+        )
+        return mask.sum()
 
     def forward(self) -> torch.Tensor:
         """Sample a hard concrete mask.
@@ -166,22 +191,23 @@ class Gate(nn.Module):
             self.current_steps += 1
                 
         else:
-            # Compile new mask if not cached
-            if self.compiled_mask is None:
-                # Get expected sparsity
-                if self.weight is None:
-                    self.compiled_mask = torch.ones(3072, device=self.gate_threshold.device)
-                else:
-                    # import pdb;pdb.set_trace()
-                    target_device = self.weight.device
-                    if self.gate_threshold.device != target_device:
-                        self.gate_threshold.data = self.gate_threshold.data.to(target_device)
-                        
-                    # self.compiled_mask = (torch.round(torch.sigmoid((self.weight**2 - self.gate_threshold**2)/self.eta_min)) ==1.0)
-                    assert not self.reverse_tau
-                    self.compiled_mask = (torch.round(torch.sigmoid((self.weight**2 - self.gate_threshold**2)/self.eta_max)) ==1.0)
-                    # print('sp:', self.compiled_mask.sum().item()/self.compiled_mask.numel(), self.compiled_mask.numel(), self.compiled_mask.sum().item(), self.gate_threshold)
-                
+            # Compile mask on the same device as attached weights (invalidates after CPU
+            # param reports before trainer.cuda()).
+            target_device = (
+                self.weight.device
+                if self.weight is not None
+                else self.gate_threshold.device
+            )
+            if self.gate_threshold.device != target_device:
+                self.gate_threshold.data = self.gate_threshold.data.to(target_device)
+
+            _stale_cache = (
+                self.compiled_mask is not None
+                and self.compiled_mask.device != target_device
+            )
+            if self.compiled_mask is None or _stale_cache:
+                self.compiled_mask = self._hard_mask_from_weight()
+
             self.mask = self.compiled_mask
 
         # import pdb;pdb.set_trace()

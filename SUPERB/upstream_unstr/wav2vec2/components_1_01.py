@@ -378,6 +378,8 @@ class MaskedLinear(nn.Module):
         # self.weight_mask = weight_mask
 
     def forward(self, x, weight_mask):
+        if weight_mask.device != self.linear.weight.device:
+            weight_mask = weight_mask.to(self.linear.weight.device)
         masked_weight = self.linear.weight * weight_mask
         return F.linear(x, masked_weight, self.linear.bias)
     
@@ -509,10 +511,16 @@ class SelfAttention(Module):
             
             
             
+        _dev = x.device
+        w_q_mask = self.w_q_mask.to(_dev)
+        w_k_mask = self.w_k_mask.to(_dev)
+        w_v_mask = self.w_v_mask.to(_dev)
+        w_out_mask = self.w_out_mask.to(_dev)
+
         shape = (batch_size, length, self.num_heads, self.head_dim)
-        q = self.q_proj(x, weight_mask=self.w_q_mask).view(*shape).transpose(2, 1)  # B, nH, L, Hd
-        k = self.k_proj(x, weight_mask=self.w_k_mask).view(*shape).permute(0, 2, 3, 1)  # B, nH, Hd, L
-        v = self.v_proj(x, weight_mask=self.w_v_mask).view(*shape).transpose(2, 1)  # B, nH, L, Hd
+        q = self.q_proj(x, weight_mask=w_q_mask).view(*shape).transpose(2, 1)  # B, nH, L, Hd
+        k = self.k_proj(x, weight_mask=w_k_mask).view(*shape).permute(0, 2, 3, 1)  # B, nH, Hd, L
+        v = self.v_proj(x, weight_mask=w_v_mask).view(*shape).transpose(2, 1)  # B, nH, L, Hd
 
         # scale down q to avoid value overflow.
         weights = (self.scaling * q) @ k  # B, nH, L, L
@@ -531,7 +539,7 @@ class SelfAttention(Module):
 
         output = output.transpose(2, 1).reshape(batch_size, length, self.num_heads * self.head_dim)
 
-        output = self.out_proj(output, weight_mask=self.w_out_mask)
+        output = self.out_proj(output, weight_mask=w_out_mask)
 
         # if self.hard_concrete_for_layer is not None:
         #     layer_mask = self.hard_concrete_for_layer() # (1,)
@@ -542,6 +550,10 @@ class SelfAttention(Module):
             
     def get_num_params(self):
         if self.gate_for_q_heads is not None:
+            self.gate_for_q_heads.get_weight(self.q_proj.linear.weight)
+            self.gate_for_k_heads.get_weight(self.k_proj.linear.weight)
+            self.gate_for_v_heads.get_weight(self.v_proj.linear.weight)
+            self.gate_for_out_heads.get_weight(self.out_proj.linear.weight)
             num_q = self.gate_for_q_heads.num()
             num_k = self.gate_for_k_heads.num()
             num_v = self.gate_for_v_heads.num()
@@ -932,6 +944,8 @@ class FeedForward(Module):
     
     def get_num_params(self):
         if self.gate_for_intermediate is not None:
+            self.gate_for_intermediate.get_weight(self.intermediate_dense.linear.weight)
+            self.gate_for_output.get_weight(self.output_dense.linear.weight)
             intermediate_features = self.gate_for_intermediate.num()
             output_features = self.gate_for_output.num()
             num_params = intermediate_features + output_features + self.intermediate_dense.linear.bias.numel() + self.output_dense.linear.bias.numel()
